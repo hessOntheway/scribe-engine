@@ -1,0 +1,20 @@
+[package]
+name = "my_claw"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+envy = "0.4"
+globset = "0.4"
+postgres = "0.19"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+uuid = "1.22.0"
+walkdir = "2"
