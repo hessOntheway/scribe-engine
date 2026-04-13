@@ -17,7 +17,7 @@ pub enum Command {
     Tools,
     /// Execute a model tool call by name and JSON input.
     ToolCall {
-        /// Tool name. Only github_pages_publish is supported.
+        /// Tool name. Builtin tools and MCP-loaded tools are supported.
         #[arg(long)]
         name: String,
         /// JSON tool input payload.

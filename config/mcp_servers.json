@@ -1,0 +1,8 @@
+[
+  {
+    "name": "mermaid",
+    "url": "https://mcp.mermaid.ai/mcp",
+    "transport": "http-first",
+    "headers": {}
+  }
+]

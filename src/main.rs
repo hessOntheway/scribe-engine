@@ -11,7 +11,7 @@ use crate::cli::{Cli, Command};
 use crate::config::{GithubConfig, LlmConfig};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::runtime::ConversationRuntime;
-use crate::tools::GlobalToolRegistry;
+use crate::tools::{GlobalToolRegistry, mcp_plugin_tools_from_config};
 use crate::tools::github_pages::GithubPagesClient;
 
 fn main() -> Result<()> {
@@ -20,7 +20,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Tools => {
-            let registry = GlobalToolRegistry::builtins().with_plugin_tools(vec![])?;
+            let registry = build_registry()?;
             let defs = registry.definitions();
             println!(
                 "{}",
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::ToolCall { name, input } => {
-            let registry = GlobalToolRegistry::builtins().with_plugin_tools(vec![])?;
+            let registry = build_registry()?;
             let output = registry.execute(&name, &input)?;
             println!("{}", output);
             Ok(())
@@ -57,7 +57,7 @@ fn main() -> Result<()> {
         Command::Ask { prompt, max_steps } => {
             let llm_cfg = LlmConfig::from_env()?;
             let llm = OpenAiCompatClient::new(llm_cfg)?;
-            let registry = GlobalToolRegistry::builtins().with_plugin_tools(vec![])?;
+            let registry = build_registry()?;
             let runtime = ConversationRuntime::new(&llm, &registry, max_steps);
             let answer = runtime.run_turn(&prompt)?;
 
@@ -65,6 +65,12 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn build_registry() -> Result<GlobalToolRegistry> {
+    let plugin_tools =
+        mcp_plugin_tools_from_config().context("failed to load MCP plugin tools")?;
+    GlobalToolRegistry::builtins().with_plugin_tools(plugin_tools)
 }
 
 fn init_github_client() -> Result<GithubPagesClient> {

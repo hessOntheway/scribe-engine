@@ -8,9 +8,11 @@ use serde_json::Value;
 pub mod github_pages;
 mod glob_search;
 mod grep_search;
+mod mcp;
 
 pub use glob_search::glob_search_handler;
 pub use grep_search::grep_search_handler;
+pub use mcp::mcp_plugin_tools_from_config;
 
 use self::github_pages::github_pages_publish_handler;
 
