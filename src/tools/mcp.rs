@@ -4,8 +4,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -115,9 +117,17 @@ pub fn mcp_plugin_tools_from_config() -> Result<Vec<ToolHandler>> {
                 let mut locked = shared
                     .lock()
                     .map_err(|_| anyhow!("failed to lock MCP client for tool call"))?;
-                let result = locked
+                let mut result = locked
                     .call_tool(&tool_name, arguments)
                     .with_context(|| format!("MCP tool call failed: {}", tool_name))?;
+                let saved_files = persist_graph_images(&tool_name, &mut result)?;
+
+                if !saved_files.is_empty() {
+                    if let Some(obj) = result.as_object_mut() {
+                        obj.insert("saved_files".to_string(), json!(saved_files));
+                    }
+                }
+
                 serde_json::to_string_pretty(&result)
                     .context("failed to serialize MCP tool output")
             });
@@ -157,7 +167,7 @@ impl McpClient {
 
             if let Some(transport) = config.transport.as_deref() {
                 remote_args.push("--transport".to_string());
-                remote_args.push(transport.to_string());
+                remote_args.push(normalize_remote_transport(transport).to_string());
             }
 
             for (header_name, header_value) in &config.headers {
@@ -426,6 +436,18 @@ impl McpClient {
     }
 }
 
+fn normalize_remote_transport(raw: &str) -> &str {
+    match raw {
+        // Mermaid docs use generic transport names in client config.
+        "http" => "http-only",
+        "sse" => "sse-only",
+        // Pass through mcp-remote native values.
+        "http-only" | "http-first" | "sse-only" | "sse-first" => raw,
+        // Fall back to mcp-remote default strategy when unknown.
+        _ => "http-first",
+    }
+}
+
 fn normalize_name(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
@@ -446,7 +468,84 @@ fn default_mermaid_server() -> McpServerConfig {
         args: vec![],
         env: HashMap::new(),
         url: Some("https://mcp.mermaid.ai/mcp".to_string()),
-        transport: Some("http-first".to_string()),
+        transport: Some("http".to_string()),
         headers: HashMap::new(),
+    }
+}
+
+fn persist_graph_images(tool_name: &str, result: &mut Value) -> Result<Vec<String>> {
+    let Some(content_items) = result.get("content").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+
+    let graph_dir = Path::new(".graph");
+    fs::create_dir_all(graph_dir)
+        .with_context(|| format!("failed to create graph directory: {}", graph_dir.display()))?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock error")?
+        .as_millis();
+
+    let mut saved_files = Vec::new();
+    let safe_tool_name = normalize_name(tool_name);
+
+    let mut image_items: Vec<&Value> = content_items
+        .iter()
+        .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("image"))
+        .collect();
+    image_items.sort_by_key(|item| image_priority(item.get("mimeType").and_then(|v| v.as_str())));
+
+    for (idx, item) in image_items.into_iter().enumerate() {
+        let Some(data_b64) = item.get("data").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let mime_type = item
+            .get("mimeType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("image/png");
+        let ext = mime_extension(mime_type);
+
+        let file_name = format!("{}_{}_{}.{}", safe_tool_name, now, idx, ext);
+        let file_path = graph_dir.join(file_name);
+        let bytes = decode_image_bytes(data_b64, mime_type, tool_name)?;
+
+        fs::write(&file_path, bytes)
+            .with_context(|| format!("failed to write graph image: {}", file_path.display()))?;
+
+        saved_files.push(file_path.to_string_lossy().to_string());
+    }
+
+    Ok(saved_files)
+}
+
+fn image_priority(mime: Option<&str>) -> u8 {
+    match mime {
+        Some("image/svg+xml") => 0,
+        Some("image/png") => 1,
+        Some("image/webp") => 2,
+        Some("image/jpeg") => 3,
+        _ => 9,
+    }
+}
+
+fn decode_image_bytes(data: &str, mime: &str, tool_name: &str) -> Result<Vec<u8>> {
+    if mime == "image/svg+xml" && data.trim_start().starts_with("<svg") {
+        return Ok(data.as_bytes().to_vec());
+    }
+
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .with_context(|| format!("failed to decode image data for tool {}", tool_name))
+}
+
+fn mime_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/svg+xml" => "svg",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "bin",
     }
 }

@@ -50,7 +50,6 @@ pub struct LlmConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
-    pub system_prompt: String,
     pub write_model_audit_log: bool,
     pub model_audit_log_path: String,
 }
@@ -62,8 +61,6 @@ struct LlmEnv {
     llm_base_url: String,
     #[serde(default = "default_llm_model")]
     llm_model: String,
-    #[serde(default = "default_llm_system_prompt")]
-    llm_system_prompt: String,
     #[serde(default)]
     llm_write_model_audit_log: bool,
     #[serde(default = "default_llm_model_audit_log_path")]
@@ -80,7 +77,6 @@ impl LlmConfig {
             api_key: env.llm_api_key,
             base_url: env.llm_base_url.trim_end_matches('/').to_string(),
             model: env.llm_model,
-            system_prompt: env.llm_system_prompt,
             write_model_audit_log: env.llm_write_model_audit_log,
             model_audit_log_path: env.llm_model_audit_log_path,
         })
@@ -93,10 +89,6 @@ fn default_llm_base_url() -> String {
 
 fn default_llm_model() -> String {
     "gpt-4.1-mini".to_string()
-}
-
-fn default_llm_system_prompt() -> String {
-    "You are a publishing assistant. Use github_pages_publish only when the user explicitly asks to publish or update blog content. Use glob_search for filenames, paths, and directory structure. Use grep_search for file content searches. When calling tools, output strict JSON arguments only; all string values must be quoted JSON strings.".to_string()
 }
 
 fn default_llm_model_audit_log_path() -> String {

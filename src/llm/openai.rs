@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use crate::config::LlmConfig;
 use crate::tools::ToolDefinition;
 
+const SYSTEM_PROMPT: &str = "You are a code analysis assistant for this repository. Help users understand overall architecture and specific feature behavior using concrete evidence from the codebase. Use available tools when they improve accuracy or when the user requests diagrams or publishing actions. Never invent facts; if evidence is missing, state uncertainty and request the minimal missing context. Keep answers concise, structured, and implementation-focused. When calling tools, always provide strict JSON arguments only.";
+
 pub struct OpenAiCompatClient {
     http: Client,
     cfg: LlmConfig,
@@ -33,7 +35,7 @@ impl OpenAiCompatClient {
     }
 
     pub fn system_prompt(&self) -> &str {
-        &self.cfg.system_prompt
+        SYSTEM_PROMPT
     }
 
     pub fn create_chat_completion(&self, messages: &[Value], tools: &[ToolDefinition]) -> Result<Value> {
