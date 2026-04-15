@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::compact::{apply_micro_compact, auto_compact_if_needed};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::tools::GlobalToolRegistry;
 
@@ -32,6 +33,7 @@ impl<'a> ConversationRuntime<'a> {
         }
 
         let tool_definitions = self.tool_registry.definitions();
+        let compact_cfg = self.llm.context_compact_config().clone();
         let mut rounds_without_todo_update = 0usize;
         let mut messages: Vec<Value> = vec![
             json!({"role": "system", "content": self.llm.system_prompt()}),
@@ -39,6 +41,19 @@ impl<'a> ConversationRuntime<'a> {
         ];
 
         for _ in 0..self.max_steps {
+            apply_micro_compact(&mut messages, &compact_cfg);
+            if let Some(event) = auto_compact_if_needed(&mut messages, &compact_cfg)? {
+                let transcript = event
+                    .transcript_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<not saved>".to_string());
+                eprintln!(
+                    "info: auto compact triggered, removed {} messages (estimated tokens: {}), transcript: {}",
+                    event.removed_messages, event.estimated_tokens_before, transcript
+                );
+            }
+
             let assistant = self.llm.create_chat_completion(&messages, &tool_definitions)?;
             messages.push(assistant.clone());
 

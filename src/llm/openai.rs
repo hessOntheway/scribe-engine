@@ -8,6 +8,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};
 
 use crate::config::LlmConfig;
+use crate::config::ContextCompactConfig;
 use crate::tools::ToolDefinition;
 
 const SYSTEM_PROMPT: &str = "You are a code analysis assistant for this repository. Help users understand overall architecture and specific feature behavior using concrete evidence from the codebase. Use available tools when they improve accuracy or when the user requests diagrams or publishing actions. For multi-step tasks, maintain progress using todo_write: keep exactly one task in_progress and mark tasks completed promptly. Never invent facts; if evidence is missing, state uncertainty and request the minimal missing context. Keep answers concise, structured, and implementation-focused. When calling tools, always provide strict JSON arguments only.";
@@ -36,6 +37,10 @@ impl OpenAiCompatClient {
 
     pub fn system_prompt(&self) -> &str {
         SYSTEM_PROMPT
+    }
+
+    pub fn context_compact_config(&self) -> &ContextCompactConfig {
+        &self.cfg.context_compact
     }
 
     pub fn create_chat_completion(&self, messages: &[Value], tools: &[ToolDefinition]) -> Result<Value> {

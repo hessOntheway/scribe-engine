@@ -1,4 +1,5 @@
 mod cli;
+mod compact;
 mod config;
 mod llm;
 mod runtime;
