@@ -9,10 +9,12 @@ pub mod github_pages;
 mod glob_search;
 mod grep_search;
 mod mcp;
+mod todo_write;
 
 pub use glob_search::glob_search_handler;
 pub use grep_search::grep_search_handler;
 pub use mcp::mcp_plugin_tools_from_config;
+pub use todo_write::todo_write_handler;
 
 use self::github_pages::github_pages_publish_handler;
 
@@ -70,6 +72,9 @@ impl GlobalToolRegistry {
 
         let grep_search = grep_search_handler();
         handlers.insert(grep_search.name().to_string(), grep_search);
+
+        let todo_write = todo_write_handler();
+        handlers.insert(todo_write.name().to_string(), todo_write);
 
         Self { handlers }
     }
