@@ -79,10 +79,7 @@ pub fn apply_micro_compact(messages: &mut [Value], cfg: &ContextCompactConfig) {
 }
 
 pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
-    messages
-        .iter()
-        .map(estimate_message_tokens)
-        .sum::<usize>()
+    messages.iter().map(estimate_message_tokens).sum::<usize>()
 }
 
 pub fn auto_compact_if_needed(
@@ -137,7 +134,10 @@ pub fn auto_compact_if_needed(
     }))
 }
 
-fn tool_notice_for_message(message: &Value, call_id_to_tool_name: &BTreeMap<String, String>) -> String {
+fn tool_notice_for_message(
+    message: &Value,
+    call_id_to_tool_name: &BTreeMap<String, String>,
+) -> String {
     let tool_name = message
         .get("tool_call_id")
         .and_then(Value::as_str)
@@ -283,10 +283,7 @@ fn summarize_message_for_timeline(message: &Value) -> String {
                 .unwrap_or_default()
         }
         "tool" => {
-            let content = message
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let content = message.get("content").and_then(Value::as_str).unwrap_or("");
             format!("tool result: {}", truncate_line(content.trim(), 160))
         }
         "user" => message
@@ -413,7 +410,13 @@ mod tests {
             .expect("auto compact should trigger");
 
         assert!(event.removed_messages >= 1);
-        assert_eq!(messages.first().and_then(|m| m.get("role")).and_then(Value::as_str), Some("system"));
+        assert_eq!(
+            messages
+                .first()
+                .and_then(|m| m.get("role"))
+                .and_then(Value::as_str),
+            Some("system")
+        );
         assert!(
             messages
                 .first()

@@ -1,18 +1,21 @@
 use std::fs::{create_dir_all, read_to_string, write};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};
 
-use crate::config::LlmConfig;
 use crate::config::ContextCompactConfig;
+use crate::config::LlmConfig;
 use crate::tools::ToolDefinition;
 
-const SYSTEM_PROMPT: &str = "You are a code analysis assistant for this repository. Help users understand overall architecture and specific feature behavior using concrete evidence from the codebase. Use available tools when they improve accuracy or when the user requests diagrams or publishing actions. For multi-step tasks, maintain progress using todo_write: keep exactly one task in_progress and mark tasks completed promptly. Never invent facts; if evidence is missing, state uncertainty and request the minimal missing context. Keep answers concise, structured, and implementation-focused. When calling tools, always provide strict JSON arguments only.";
+const SYSTEM_PROMPT: &str = "You are a code analysis assistant for this repository. Help users understand overall architecture and specific feature behavior using concrete evidence from the codebase. Use available tools when they improve accuracy or when the user requests diagrams or publishing actions. For multi-step tasks, maintain progress using todo_write: keep exactly one task in_progress and mark tasks completed promptly. If a subtask benefits from a clean context, use task to delegate it and return to the parent with the result. Never invent facts; if evidence is missing, state uncertainty and request the minimal missing context. Keep answers concise, structured, and implementation-focused. When calling tools, always provide strict JSON arguments only.";
+const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent for this repository. Work from a fresh context, use tools as needed, and return only the concise final answer that helps the parent agent. Do not mention internal tool traces unless they are necessary to support the answer. When calling tools, always provide strict JSON arguments only.";
 
+#[derive(Clone)]
 pub struct OpenAiCompatClient {
     http: Client,
     cfg: LlmConfig,
@@ -39,11 +42,45 @@ impl OpenAiCompatClient {
         SYSTEM_PROMPT
     }
 
+    pub fn subagent_system_prompt(&self) -> &str {
+        SUBAGENT_SYSTEM_PROMPT
+    }
+
     pub fn context_compact_config(&self) -> &ContextCompactConfig {
         &self.cfg.context_compact
     }
 
-    pub fn create_chat_completion(&self, messages: &[Value], tools: &[ToolDefinition]) -> Result<Value> {
+    pub fn write_model_audit_log_enabled(&self) -> bool {
+        self.cfg.write_model_audit_log
+    }
+
+    pub fn subagent_audit_log_path(&self, subagent_id: &str) -> String {
+        let configured = Path::new(&self.cfg.model_audit_log_path);
+        let parent_dir = configured.parent().unwrap_or_else(|| Path::new("."));
+        let subagent_dir = parent_dir.join("subagents");
+
+        let stem = configured
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("llm_response_audit");
+
+        let extension = configured
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("json");
+
+        subagent_dir
+            .join(format!("{}_subagent_{}.{}", stem, subagent_id, extension))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    pub fn create_chat_completion_with_audit_path(
+        &self,
+        messages: &[Value],
+        tools: &[ToolDefinition],
+        audit_log_path_override: Option<&str>,
+    ) -> Result<Value> {
         let openai_tools: Vec<Value> = tools
             .iter()
             .map(|t| {
@@ -91,11 +128,8 @@ impl OpenAiCompatClient {
             .context("failed to decode model api response")?;
 
         if self.cfg.write_model_audit_log {
-            if let Err(err) = write_model_audit_log(
-                &self.cfg.model_audit_log_path,
-                &body,
-                &payload,
-            ) {
+            let audit_log_path = audit_log_path_override.unwrap_or(&self.cfg.model_audit_log_path);
+            if let Err(err) = write_model_audit_log(audit_log_path, &body, &payload) {
                 eprintln!("warn: failed to write llm audit log: {err}");
             }
         }
@@ -110,15 +144,12 @@ impl OpenAiCompatClient {
     }
 }
 
-fn write_model_audit_log(
-    path: &str,
-    request: &Value,
-    payload: &Value,
-) -> Result<()> {
+fn write_model_audit_log(path: &str, request: &Value, payload: &Value) -> Result<()> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
-            create_dir_all(parent)
-                .with_context(|| format!("failed to create audit log directory: {}", parent.display()))?;
+            create_dir_all(parent).with_context(|| {
+                format!("failed to create audit log directory: {}", parent.display())
+            })?;
         }
     }
 

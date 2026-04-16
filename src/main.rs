@@ -7,13 +7,15 @@ mod tools;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::sync::Arc;
 
 use crate::cli::{Cli, Command};
 use crate::config::{GithubConfig, LlmConfig};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::runtime::ConversationRuntime;
-use crate::tools::{GlobalToolRegistry, mcp_plugin_tools_from_config};
 use crate::tools::github_pages::GithubPagesClient;
+use crate::tools::task::task_handler;
+use crate::tools::{GlobalToolRegistry, mcp_plugin_tools_from_config};
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -57,9 +59,16 @@ fn main() -> Result<()> {
         }
         Command::Ask { prompt, max_steps } => {
             let llm_cfg = LlmConfig::from_env()?;
-            let llm = OpenAiCompatClient::new(llm_cfg)?;
-            let registry = build_registry()?;
-            let runtime = ConversationRuntime::new(&llm, &registry, max_steps);
+            let llm = Arc::new(OpenAiCompatClient::new(llm_cfg)?);
+            let base_registry = build_registry()?;
+            let child_registry = Arc::new(base_registry.without_tool("task"));
+            let task_tool = task_handler(
+                Arc::new(crate::runtime::AgentLoop::new(Arc::clone(&llm), max_steps)),
+                Arc::clone(&child_registry),
+            );
+            let parent_registry = Arc::new(base_registry.with_tool(task_tool)?);
+            let runtime =
+                ConversationRuntime::new(Arc::clone(&llm), Arc::clone(&parent_registry), max_steps);
             let answer = runtime.run_turn(&prompt)?;
 
             println!("{}", answer);
@@ -69,8 +78,7 @@ fn main() -> Result<()> {
 }
 
 fn build_registry() -> Result<GlobalToolRegistry> {
-    let plugin_tools =
-        mcp_plugin_tools_from_config().context("failed to load MCP plugin tools")?;
+    let plugin_tools = mcp_plugin_tools_from_config().context("failed to load MCP plugin tools")?;
     GlobalToolRegistry::builtins().with_plugin_tools(plugin_tools)
 }
 

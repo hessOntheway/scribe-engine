@@ -27,6 +27,7 @@ pub struct ToolDefinition {
 
 pub(super) type ToolExecutor = Arc<dyn Fn(&str) -> Result<String> + Send + Sync>;
 
+#[derive(Clone)]
 pub struct ToolHandler {
     definition: ToolDefinition,
     execute: ToolExecutor,
@@ -53,6 +54,7 @@ impl ToolHandler {
     }
 }
 
+#[derive(Clone)]
 pub struct GlobalToolRegistry {
     handlers: HashMap<String, ToolHandler>,
 }
@@ -75,6 +77,27 @@ impl GlobalToolRegistry {
 
         let todo_write = todo_write_handler();
         handlers.insert(todo_write.name().to_string(), todo_write);
+
+        Self { handlers }
+    }
+
+    pub fn with_tool(mut self, tool: ToolHandler) -> Result<Self> {
+        let name = tool.name().to_string();
+        if self.handlers.contains_key(&name) {
+            bail!("tool name conflicts with existing handler: {}", name);
+        }
+
+        self.handlers.insert(name, tool);
+        Ok(self)
+    }
+
+    pub fn without_tool(&self, name: &str) -> Self {
+        let handlers = self
+            .handlers
+            .iter()
+            .filter(|(tool_name, _)| tool_name.as_str() != name)
+            .map(|(tool_name, handler)| (tool_name.clone(), handler.clone()))
+            .collect();
 
         Self { handlers }
     }
@@ -108,3 +131,5 @@ impl GlobalToolRegistry {
         handler.run(input_json)
     }
 }
+
+pub mod task;

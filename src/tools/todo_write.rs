@@ -94,7 +94,9 @@ impl TodoManager {
 pub fn todo_write_handler() -> ToolHandler {
     let definition = ToolDefinition {
         name: "todo_write".to_string(),
-        description: "Update the task plan for multi-step work. Provide the full todos list each time.".to_string(),
+        description:
+            "Update the task plan for multi-step work. Provide the full todos list each time."
+                .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {

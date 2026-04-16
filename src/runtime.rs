@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact::{apply_micro_compact, auto_compact_if_needed};
 use crate::llm::openai::OpenAiCompatClient;
@@ -7,36 +10,61 @@ use crate::tools::GlobalToolRegistry;
 
 const TODO_REMINDER_THRESHOLD: usize = 3;
 const TODO_REMINDER_MESSAGE: &str = "For multi-step work, update todo_write with the full task list, keep exactly one in_progress task, and mark completed tasks promptly.";
+static SUBAGENT_AUDIT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-pub struct ConversationRuntime<'a> {
-    llm: &'a OpenAiCompatClient,
-    tool_registry: &'a GlobalToolRegistry,
+pub struct AgentLoop {
+    llm: Arc<OpenAiCompatClient>,
     max_steps: usize,
 }
 
-impl<'a> ConversationRuntime<'a> {
-    pub fn new(
-        llm: &'a OpenAiCompatClient,
-        tool_registry: &'a GlobalToolRegistry,
-        max_steps: usize,
-    ) -> Self {
-        Self {
-            llm,
-            tool_registry,
-            max_steps,
-        }
+impl AgentLoop {
+    pub fn new(llm: Arc<OpenAiCompatClient>, max_steps: usize) -> Self {
+        Self { llm, max_steps }
     }
 
-    pub fn run_turn(&self, user_prompt: &str) -> Result<String> {
+    pub fn run_turn(
+        &self,
+        user_prompt: &str,
+        tool_registry: &GlobalToolRegistry,
+    ) -> Result<String> {
+        self.run_with_system_prompt(user_prompt, self.llm.system_prompt(), tool_registry, None)
+    }
+
+    pub fn run_subagent(
+        &self,
+        user_prompt: &str,
+        tool_registry: &GlobalToolRegistry,
+    ) -> Result<String> {
+        let audit_path = if self.llm.write_model_audit_log_enabled() {
+            Some(self.llm.subagent_audit_log_path(&next_subagent_audit_id()))
+        } else {
+            None
+        };
+
+        self.run_with_system_prompt(
+            user_prompt,
+            self.llm.subagent_system_prompt(),
+            tool_registry,
+            audit_path.as_deref(),
+        )
+    }
+
+    fn run_with_system_prompt(
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        tool_registry: &GlobalToolRegistry,
+        audit_log_path_override: Option<&str>,
+    ) -> Result<String> {
         if self.max_steps == 0 {
             bail!("max_steps must be greater than 0");
         }
 
-        let tool_definitions = self.tool_registry.definitions();
+        let tool_definitions = tool_registry.definitions();
         let compact_cfg = self.llm.context_compact_config().clone();
         let mut rounds_without_todo_update = 0usize;
         let mut messages: Vec<Value> = vec![
-            json!({"role": "system", "content": self.llm.system_prompt()}),
+            json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": user_prompt}),
         ];
 
@@ -54,7 +82,13 @@ impl<'a> ConversationRuntime<'a> {
                 );
             }
 
-            let assistant = self.llm.create_chat_completion(&messages, &tool_definitions)?;
+            let assistant = self
+                .llm
+                .create_chat_completion_with_audit_path(
+                    &messages,
+                    &tool_definitions,
+                    audit_log_path_override,
+                )?;
             messages.push(assistant.clone());
 
             let tool_calls = assistant
@@ -100,7 +134,7 @@ impl<'a> ConversationRuntime<'a> {
                     todo_updated_in_round = true;
                 }
 
-                let result = match self.tool_registry.execute(name, arguments) {
+                let result = match tool_registry.execute(name, arguments) {
                     Ok(output) => output,
                     Err(err) => format!("tool_error: {}", err),
                 };
@@ -130,5 +164,37 @@ impl<'a> ConversationRuntime<'a> {
             "model/tool loop reached max steps ({}) without final answer",
             self.max_steps
         )
+    }
+}
+
+fn next_subagent_audit_id() -> String {
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = SUBAGENT_AUDIT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{ts_ms}_{seq}")
+}
+
+pub struct ConversationRuntime {
+    agent_loop: Arc<AgentLoop>,
+    tool_registry: Arc<GlobalToolRegistry>,
+}
+
+impl ConversationRuntime {
+    pub fn new(
+        llm: Arc<OpenAiCompatClient>,
+        tool_registry: Arc<GlobalToolRegistry>,
+        max_steps: usize,
+    ) -> Self {
+        Self {
+            agent_loop: Arc::new(AgentLoop::new(llm, max_steps)),
+            tool_registry,
+        }
+    }
+
+    pub fn run_turn(&self, user_prompt: &str) -> Result<String> {
+        self.agent_loop
+            .run_turn(user_prompt, self.tool_registry.as_ref())
     }
 }

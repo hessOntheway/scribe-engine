@@ -145,7 +145,11 @@ fn run_grep_search(input: &GrepSearchInput) -> Result<GrepSearchOutput> {
             if regex.is_match(line) {
                 matches.push(GrepSearchMatch {
                     path: rel_or_abs.clone(),
-                    line: if input.line_numbers { Some(idx + 1) } else { None },
+                    line: if input.line_numbers {
+                        Some(idx + 1)
+                    } else {
+                        None
+                    },
                     text: line.to_string(),
                 });
             }

@@ -84,8 +84,8 @@ pub fn github_pages_publish_handler() -> ToolHandler {
         let github = GithubPagesClient::new(github_cfg)?;
         github.auth_check()?;
 
-        let input: GithubPagesPublishInput =
-            serde_json::from_str(input_json).context("invalid input JSON for github_pages_publish")?;
+        let input: GithubPagesPublishInput = serde_json::from_str(input_json)
+            .context("invalid input JSON for github_pages_publish")?;
 
         let message = input.message.unwrap_or_else(|| match input.action {
             PublishAction::Publish => "publish blog post".to_string(),
@@ -110,7 +110,10 @@ pub fn github_pages_publish_handler() -> ToolHandler {
 impl GithubPagesClient {
     pub fn new(cfg: GithubConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("my-claw-blog-agent/0.1"));
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static("my-claw-blog-agent/0.1"),
+        );
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),

@@ -40,7 +40,8 @@ struct GlobSearchOutput {
 pub fn glob_search_handler() -> ToolHandler {
     let definition = ToolDefinition {
         name: "glob_search".to_string(),
-        description: "Search for files and directories by glob pattern for path discovery.".to_string(),
+        description: "Search for files and directories by glob pattern for path discovery."
+            .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -101,15 +102,15 @@ fn run_glob_search(input: &GlobSearchInput) -> Result<GlobSearchOutput> {
         });
     }
 
-    for entry in WalkDir::new(&root).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         if entry.depth() == 0 {
             continue;
         }
 
-        let relative_path = entry
-            .path()
-            .strip_prefix(&root)
-            .unwrap_or(entry.path());
+        let relative_path = entry.path().strip_prefix(&root).unwrap_or(entry.path());
 
         if matcher.is_match(relative_path) {
             let kind = if entry.file_type().is_dir() {

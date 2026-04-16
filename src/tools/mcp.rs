@@ -128,8 +128,7 @@ pub fn mcp_plugin_tools_from_config() -> Result<Vec<ToolHandler>> {
                     }
                 }
 
-                serde_json::to_string_pretty(&result)
-                    .context("failed to serialize MCP tool output")
+                serde_json::to_string_pretty(&result).context("failed to serialize MCP tool output")
             });
 
             handlers.push(ToolHandler::new(definition, execute));
@@ -339,7 +338,8 @@ impl McpClient {
     }
 
     fn write_message(&mut self, message: &Value) -> Result<()> {
-        let payload = serde_json::to_vec(message).context("failed to encode MCP jsonrpc payload")?;
+        let payload =
+            serde_json::to_vec(message).context("failed to encode MCP jsonrpc payload")?;
         match self.process.wire_protocol {
             WireProtocol::ContentLength => {
                 let header = format!("Content-Length: {}\r\n\r\n", payload.len());
@@ -390,8 +390,7 @@ impl McpClient {
                     continue;
                 }
 
-                return serde_json::from_str(trimmed)
-                    .context("invalid JSON in MCP response line");
+                return serde_json::from_str(trimmed).context("invalid JSON in MCP response line");
             }
         }
 
