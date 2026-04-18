@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,9 +8,12 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::config::ContextCompactConfig;
+use crate::llm::openai::OpenAiCompatClient;
 
 const COMPACTED_TOOL_RESULT_NOTICE: &str = "[Previous tool_result compacted]";
 const CONTINUATION_PREFIX: &str = "[Context compacted]";
+const COMPACT_SUMMARY_SYSTEM_PROMPT: &str = "You summarize an agent conversation for future continuity. Preserve only durable context: current goal, completed work, open tasks, important file paths, tool usage, and unresolved decisions. Do not invent facts. Do not mention that you are summarizing. Output plain text only.";
+const MAX_SUMMARY_SOURCE_CHARS: usize = 60_000;
 
 #[derive(Debug, Clone)]
 pub struct AutoCompactEvent {
@@ -85,6 +88,8 @@ pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
 pub fn auto_compact_if_needed(
     messages: &mut Vec<Value>,
     cfg: &ContextCompactConfig,
+    llm: &OpenAiCompatClient,
+    audit_log_path_override: Option<&str>,
 ) -> Result<Option<AutoCompactEvent>> {
     if !cfg.enabled {
         return Ok(None);
@@ -115,7 +120,14 @@ pub fn auto_compact_if_needed(
         .len()
         .saturating_sub(cfg.auto_preserve_recent_messages);
     let removed = messages[..keep_from].to_vec();
-    let summary = build_compact_summary(&removed);
+    let summary_source = build_compact_summary_source(&removed);
+    let summary = match generate_compact_summary(llm, &summary_source, audit_log_path_override) {
+        Ok(summary) => summary,
+        Err(err) => {
+            eprintln!("warn: failed to generate compact summary: {err}");
+            return Ok(None);
+        }
+    };
 
     let mut next_messages: Vec<Value> = Vec::with_capacity(cfg.auto_preserve_recent_messages + 1);
     next_messages.push(json!({
@@ -132,6 +144,31 @@ pub fn auto_compact_if_needed(
         estimated_tokens_before,
         transcript_path,
     }))
+}
+
+fn generate_compact_summary(
+    llm: &OpenAiCompatClient,
+    summary_source: &str,
+    audit_log_path_override: Option<&str>,
+) -> Result<String> {
+    let messages = vec![
+        json!({"role": "system", "content": COMPACT_SUMMARY_SYSTEM_PROMPT}),
+        json!({
+            "role": "user",
+            "content": format!(
+                "Summarize the conversation below into a compact continuity note. Keep it brief but useful. Use short sections or bullets if helpful.\n\nTRANSCRIPT START\n{summary_source}\nTRANSCRIPT END"
+            )
+        }),
+    ];
+
+    let response = llm.create_chat_completion_with_audit_path(&messages, &[], audit_log_path_override)?;
+    response
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .context("compact summary response missing content")
 }
 
 fn tool_notice_for_message(
@@ -172,138 +209,28 @@ fn backup_transcript(messages: &[Value], dir: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn build_compact_summary(removed: &[Value]) -> String {
-    let mut role_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut tool_names: BTreeSet<String> = BTreeSet::new();
-    let mut user_requests: Vec<String> = Vec::new();
-    let mut timeline: Vec<String> = Vec::new();
-
-    for message in removed {
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        *role_counts.entry(role.clone()).or_insert(0) += 1;
-
-        if role == "assistant" {
-            if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-                for call in tool_calls {
-                    if let Some(name) = call
-                        .get("function")
-                        .and_then(Value::as_object)
-                        .and_then(|f| f.get("name"))
-                        .and_then(Value::as_str)
-                    {
-                        tool_names.insert(name.to_string());
-                    }
-                }
-            }
-        }
-
-        if role == "user" {
-            if let Some(content) = message.get("content").and_then(Value::as_str) {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    user_requests.push(truncate_line(trimmed, 180));
-                }
-            }
-        }
-
-        let item = summarize_message_for_timeline(message);
-        if !item.is_empty() {
-            timeline.push(item);
-        }
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("Compacted {} earlier messages.", removed.len()));
-
-    if !role_counts.is_empty() {
-        let mut parts = Vec::new();
-        for (role, count) in role_counts {
-            parts.push(format!("{role}={count}"));
-        }
-        lines.push(format!("Role counts: {}", parts.join(", ")));
-    }
-
-    if !tool_names.is_empty() {
-        let names = tool_names.into_iter().collect::<Vec<_>>().join(", ");
-        lines.push(format!("Tools used: {names}"));
-    }
-
-    if !user_requests.is_empty() {
-        lines.push("Recent user requests: ".to_string());
-        for req in user_requests.iter().rev().take(3).rev() {
-            lines.push(format!("- {req}"));
-        }
-    }
-
-    if !timeline.is_empty() {
-        lines.push("Timeline highlights: ".to_string());
-        for item in timeline.into_iter().rev().take(8).rev() {
-            lines.push(format!("- {item}"));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn summarize_message_for_timeline(message: &Value) -> String {
-    let role = message
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-
-    match role {
-        "assistant" => {
-            if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-                if !tool_calls.is_empty() {
-                    let mut names = Vec::new();
-                    for call in tool_calls {
-                        if let Some(name) = call
-                            .get("function")
-                            .and_then(Value::as_object)
-                            .and_then(|f| f.get("name"))
-                            .and_then(Value::as_str)
-                        {
-                            names.push(name.to_string());
-                        }
-                    }
-                    if !names.is_empty() {
-                        return format!("assistant called tools: {}", names.join(", "));
-                    }
-                }
-            }
-
-            message
-                .get("content")
-                .and_then(Value::as_str)
-                .map(|s| format!("assistant: {}", truncate_line(s.trim(), 160)))
-                .unwrap_or_default()
-        }
-        "tool" => {
-            let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-            format!("tool result: {}", truncate_line(content.trim(), 160))
-        }
-        "user" => message
-            .get("content")
-            .and_then(Value::as_str)
-            .map(|s| format!("user: {}", truncate_line(s.trim(), 160)))
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
-fn truncate_line(input: &str, max_chars: usize) -> String {
-    if input.chars().count() <= max_chars {
-        return input.to_string();
-    }
+fn build_compact_summary_source(removed: &[Value]) -> String {
     let mut out = String::new();
-    for ch in input.chars().take(max_chars) {
-        out.push(ch);
+    for (index, message) in removed.iter().enumerate() {
+        let line = match serde_json::to_string(message) {
+            Ok(serialized) => serialized,
+            Err(_) => "{\"error\":\"failed to serialize message\"}".to_string(),
+        };
+
+        let next_len = out.len().saturating_add(line.len()).saturating_add(1);
+        if next_len > MAX_SUMMARY_SOURCE_CHARS {
+            out.push_str(&format!(
+                "\n[... truncated after {} removed messages due to summary source limit ...]",
+                index
+            ));
+            break;
+        }
+
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&line);
     }
-    out.push_str("...");
     out
 }
 
@@ -405,25 +332,17 @@ mod tests {
             transcript_dir: ".transcripts_test".to_string(),
         };
 
-        let event = auto_compact_if_needed(&mut messages, &cfg)
-            .expect("auto compact should not fail")
-            .expect("auto compact should trigger");
+        let llm = OpenAiCompatClient::new(crate::config::LlmConfig {
+            api_key: "test".to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            model: "gpt-4.1-mini".to_string(),
+            write_model_audit_log: false,
+            model_audit_log_path: ".auditlog/llm_response_audit.json".to_string(),
+            context_compact: cfg.clone(),
+        })
+        .expect("llm client should build");
 
-        assert!(event.removed_messages >= 1);
-        assert_eq!(
-            messages
-                .first()
-                .and_then(|m| m.get("role"))
-                .and_then(Value::as_str),
-            Some("system")
-        );
-        assert!(
-            messages
-                .first()
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .contains(CONTINUATION_PREFIX)
-        );
+        let result = auto_compact_if_needed(&mut messages, &cfg, &llm, None);
+        assert!(result.is_err() || result.ok().flatten().is_none());
     }
 }

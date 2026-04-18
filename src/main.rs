@@ -14,8 +14,11 @@ use crate::config::{GithubConfig, LlmConfig};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::runtime::ConversationRuntime;
 use crate::tools::github_pages::GithubPagesClient;
-use crate::tools::task::task_handler;
-use crate::tools::{GlobalToolRegistry, mcp_plugin_tools_from_config};
+use crate::tools::task::{task_handler, task_query_handlers};
+use crate::tools::{
+    GlobalToolRegistry, TaskRegistry, TeamManager, mcp_plugin_tools_from_config,
+    team_tool_handlers,
+};
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -61,12 +64,34 @@ fn main() -> Result<()> {
             let llm_cfg = LlmConfig::from_env()?;
             let llm = Arc::new(OpenAiCompatClient::new(llm_cfg)?);
             let base_registry = build_registry()?;
-            let child_registry = Arc::new(base_registry.without_tool("task"));
+            let shared_agent_loop = Arc::new(crate::runtime::AgentLoop::new(Arc::clone(&llm), max_steps));
+            let task_registry = Arc::new(TaskRegistry::new());
+
+            let team_child_registry = Arc::new(base_registry.without_tool("task"));
             let task_tool = task_handler(
-                Arc::new(crate::runtime::AgentLoop::new(Arc::clone(&llm), max_steps)),
-                Arc::clone(&child_registry),
+                Arc::clone(&shared_agent_loop),
+                Arc::clone(&team_child_registry),
+                Arc::clone(&task_registry),
             );
-            let parent_registry = Arc::new(base_registry.with_tool(task_tool)?);
+            let task_query_tools = task_query_handlers(Arc::clone(&task_registry));
+
+            let team_dir = std::env::var("AGENT_TEAM_DIR").unwrap_or_else(|_| ".team".to_string());
+            let team_manager = Arc::new(TeamManager::new(team_dir)?);
+            let team_tools = team_tool_handlers(
+                Arc::clone(&team_manager),
+                Arc::clone(&shared_agent_loop),
+                Arc::clone(&team_child_registry),
+                Arc::clone(&task_registry),
+            );
+
+            let mut parent_registry = base_registry.with_tool(task_tool)?;
+            for tool in task_query_tools {
+                parent_registry = parent_registry.with_tool(tool)?;
+            }
+            for tool in team_tools {
+                parent_registry = parent_registry.with_tool(tool)?;
+            }
+            let parent_registry = Arc::new(parent_registry);
             let runtime =
                 ConversationRuntime::new(Arc::clone(&llm), Arc::clone(&parent_registry), max_steps);
             let answer = runtime.run_turn(&prompt)?;

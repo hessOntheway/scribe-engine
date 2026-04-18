@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact::{apply_micro_compact, auto_compact_if_needed};
 use crate::llm::openai::OpenAiCompatClient;
-use crate::tools::GlobalToolRegistry;
+use crate::tools::{GlobalToolRegistry, has_persisted_active_todos};
 
 const TODO_REMINDER_THRESHOLD: usize = 3;
 const TODO_REMINDER_MESSAGE: &str = "For multi-step work, update todo_write with the full task list, keep exactly one in_progress task, and mark completed tasks promptly.";
@@ -62,7 +62,11 @@ impl AgentLoop {
 
         let tool_definitions = tool_registry.definitions();
         let compact_cfg = self.llm.context_compact_config().clone();
-        let mut rounds_without_todo_update = 0usize;
+        let mut rounds_without_todo_update = if has_persisted_active_todos() {
+            TODO_REMINDER_THRESHOLD.saturating_sub(1)
+        } else {
+            0
+        };
         let mut messages: Vec<Value> = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": user_prompt}),
@@ -70,7 +74,7 @@ impl AgentLoop {
 
         for _ in 0..self.max_steps {
             apply_micro_compact(&mut messages, &compact_cfg);
-            if let Some(event) = auto_compact_if_needed(&mut messages, &compact_cfg)? {
+            if let Some(event) = auto_compact_if_needed(&mut messages, &compact_cfg, self.llm.as_ref(), audit_log_path_override)? {
                 let transcript = event
                     .transcript_path
                     .as_ref()

@@ -9,11 +9,16 @@ pub mod github_pages;
 mod glob_search;
 mod grep_search;
 mod mcp;
+pub mod team;
+mod task_registry;
 mod todo_write;
 
 pub use glob_search::glob_search_handler;
 pub use grep_search::grep_search_handler;
 pub use mcp::mcp_plugin_tools_from_config;
+pub use task_registry::TaskRegistry;
+pub use team::{TeamManager, team_tool_handlers};
+pub use todo_write::has_persisted_active_todos;
 pub use todo_write::todo_write_handler;
 
 use self::github_pages::github_pages_publish_handler;
