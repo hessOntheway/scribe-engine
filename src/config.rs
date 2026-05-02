@@ -7,17 +7,16 @@ pub struct GithubConfig {
     pub password: String,
     pub owner: String,
     pub repo: String,
-    pub branch: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct GithubEnv {
     github_username: String,
     github_password: String,
-    #[serde(default = "default_branch")]
-    github_pages_branch: String,
     #[serde(default)]
-    github_pages_owner: Option<String>,
+    github_wiki_owner: Option<String>,
+    #[serde(default)]
+    github_wiki_repo: Option<String>,
 }
 
 impl GithubConfig {
@@ -26,23 +25,31 @@ impl GithubConfig {
             .from_env()
             .context("failed to read env vars (need GITHUB_USERNAME/GITHUB_PASSWORD)")?;
         let owner = env
-            .github_pages_owner
+            .github_wiki_owner
             .clone()
             .unwrap_or_else(|| env.github_username.clone());
-        let repo = format!("{}.github.io", owner);
+        let repo = env
+            .github_wiki_repo
+            .clone()
+            .unwrap_or_else(|| current_repo_name().unwrap_or_else(|| "repository".to_string()));
 
         Ok(Self {
             username: env.github_username,
             password: env.github_password,
             owner,
             repo,
-            branch: env.github_pages_branch,
         })
     }
 }
 
-fn default_branch() -> String {
-    "main".to_string()
+fn current_repo_name() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let name = cwd.file_name()?.to_string_lossy().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 #[derive(Debug, Clone)]

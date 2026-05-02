@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "my_claw",
     version,
-    about = "Restricted GitHub Pages blog publisher"
+    about = "Restricted GitHub Wiki markdown publisher"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -24,28 +24,28 @@ pub enum Command {
         #[arg(long)]
         input: String,
     },
-    /// Publish a new blog post to GitHub Pages.
+    /// Publish a new markdown page to GitHub Wiki.
     Publish {
-        /// Blog file path in the Pages repo. Must be under posts/ and end with .md
+        /// Wiki file path in the wiki repository. Must be a relative .md path
         #[arg(long)]
         path: String,
         /// Local markdown file to upload
         #[arg(long)]
         file: String,
         /// Commit message
-        #[arg(long, default_value = "publish blog post")]
+        #[arg(long, default_value = "publish wiki page")]
         message: String,
     },
-    /// Update an existing blog post on GitHub Pages.
+    /// Update an existing markdown page on GitHub Wiki.
     Update {
-        /// Blog file path in the Pages repo. Must be under posts/ and end with .md
+        /// Wiki file path in the wiki repository. Must be a relative .md path
         #[arg(long)]
         path: String,
         /// Local markdown file to upload
         #[arg(long)]
         file: String,
         /// Commit message
-        #[arg(long, default_value = "update blog post")]
+        #[arg(long, default_value = "update wiki page")]
         message: String,
     },
     /// Ask the model to plan/execute with registered tools.

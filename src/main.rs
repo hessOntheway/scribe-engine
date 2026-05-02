@@ -13,7 +13,7 @@ use crate::cli::{Cli, Command};
 use crate::config::{GithubConfig, LlmConfig};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::runtime::ConversationRuntime;
-use crate::tools::github_pages::GithubPagesClient;
+use crate::tools::github_wiki::GithubWikiClient;
 use crate::tools::task::{task_handler, task_query_handlers};
 use crate::tools::{
     GlobalToolRegistry, TaskRegistry, TeamManager, mcp_plugin_tools_from_config,
@@ -46,8 +46,8 @@ fn main() -> Result<()> {
             message,
         } => {
             let github = init_github_client()?;
-            github.publish_post(&path, &file, &message)?;
-            println!("successfully synced blog file: {}", path);
+            github.publish_page(&path, &file, &message)?;
+            println!("successfully synced wiki file: {}", path);
             Ok(())
         }
         Command::Update {
@@ -56,8 +56,8 @@ fn main() -> Result<()> {
             message,
         } => {
             let github = init_github_client()?;
-            github.update_post(&path, &file, &message)?;
-            println!("successfully synced blog file: {}", path);
+            github.update_page(&path, &file, &message)?;
+            println!("successfully synced wiki file: {}", path);
             Ok(())
         }
         Command::Ask { prompt, max_steps } => {
@@ -107,9 +107,9 @@ fn build_registry() -> Result<GlobalToolRegistry> {
     GlobalToolRegistry::builtins().with_plugin_tools(plugin_tools)
 }
 
-fn init_github_client() -> Result<GithubPagesClient> {
+fn init_github_client() -> Result<GithubWikiClient> {
     let github_cfg = GithubConfig::from_env()?;
-    let github = GithubPagesClient::new(github_cfg)?;
+    let github = GithubWikiClient::new(github_cfg)?;
     github.auth_check()?;
     Ok(github)
 }

@@ -19,7 +19,7 @@ enum PublishAction {
 }
 
 #[derive(Debug, Deserialize)]
-struct GithubPagesPublishInput {
+struct GithubWikiPublishInput {
     action: PublishAction,
     path: String,
     file: String,
@@ -36,33 +36,31 @@ struct ExistingFile {
 struct PutFileRequest<'a> {
     message: &'a str,
     content: String,
-    branch: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     sha: Option<String>,
 }
 
 #[derive(Debug)]
-pub struct GithubPagesClient {
+pub struct GithubWikiClient {
     http: Client,
     cfg: GithubConfig,
 }
 
-pub fn github_pages_publish_handler() -> ToolHandler {
+pub fn github_wiki_publish_handler() -> ToolHandler {
     let definition = ToolDefinition {
-        name: "github_pages_publish".to_string(),
-        description: "Publish or update a markdown blog post in GitHub Pages under posts/*.md only"
-            .to_string(),
+        name: "github_wiki_publish".to_string(),
+        description: "Publish or update a markdown page in the repository wiki".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["publish", "update"],
-                    "description": "publish creates a new post; update modifies an existing post"
+                    "description": "publish creates a new page; update modifies an existing page"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Path in Pages repo, must match posts/*.md"
+                    "description": "Path in wiki repo, must be a relative *.md path"
                 },
                 "file": {
                     "type": "string",
@@ -80,25 +78,25 @@ pub fn github_pages_publish_handler() -> ToolHandler {
 
     let execute: ToolExecutor = std::sync::Arc::new(move |input_json: &str| {
         let github_cfg = GithubConfig::from_env()
-            .context("github_pages_publish requires GITHUB_USERNAME/GITHUB_PASSWORD")?;
-        let github = GithubPagesClient::new(github_cfg)?;
+            .context("github_wiki_publish requires GITHUB_USERNAME/GITHUB_PASSWORD")?;
+        let github = GithubWikiClient::new(github_cfg)?;
         github.auth_check()?;
 
-        let input: GithubPagesPublishInput = serde_json::from_str(input_json)
-            .context("invalid input JSON for github_pages_publish")?;
+        let input: GithubWikiPublishInput = serde_json::from_str(input_json)
+            .context("invalid input JSON for github_wiki_publish")?;
 
         let message = input.message.unwrap_or_else(|| match input.action {
-            PublishAction::Publish => "publish blog post".to_string(),
-            PublishAction::Update => "update blog post".to_string(),
+            PublishAction::Publish => "publish wiki page".to_string(),
+            PublishAction::Update => "update wiki page".to_string(),
         });
 
         match input.action {
             PublishAction::Publish => {
-                github.publish_post(&input.path, &input.file, &message)?;
+                github.publish_page(&input.path, &input.file, &message)?;
                 Ok(format!("published {}", input.path))
             }
             PublishAction::Update => {
-                github.update_post(&input.path, &input.file, &message)?;
+                github.update_page(&input.path, &input.file, &message)?;
                 Ok(format!("updated {}", input.path))
             }
         }
@@ -107,7 +105,7 @@ pub fn github_pages_publish_handler() -> ToolHandler {
     ToolHandler::new(definition, execute)
 }
 
-impl GithubPagesClient {
+impl GithubWikiClient {
     pub fn new(cfg: GithubConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -145,35 +143,35 @@ impl GithubPagesClient {
         Ok(())
     }
 
-    pub fn publish_post(&self, repo_path: &str, local_file: &str, message: &str) -> Result<()> {
-        validate_blog_path(repo_path)?;
+    pub fn publish_page(&self, wiki_path: &str, local_file: &str, message: &str) -> Result<()> {
+        validate_wiki_path(wiki_path)?;
 
-        if self.fetch_existing_sha(repo_path)?.is_some() {
+        if self.fetch_existing_sha(wiki_path)?.is_some() {
             bail!(
-                "publish only creates new posts: {} already exists. Use update instead.",
-                repo_path
+                "publish only creates new pages: {} already exists. Use update instead.",
+                wiki_path
             );
         }
 
-        self.put_file(repo_path, local_file, message, None)
+        self.put_file(wiki_path, local_file, message, None)
     }
 
-    pub fn update_post(&self, repo_path: &str, local_file: &str, message: &str) -> Result<()> {
-        validate_blog_path(repo_path)?;
+    pub fn update_page(&self, wiki_path: &str, local_file: &str, message: &str) -> Result<()> {
+        validate_wiki_path(wiki_path)?;
 
-        let sha = self.fetch_existing_sha(repo_path)?.with_context(|| {
+        let sha = self.fetch_existing_sha(wiki_path)?.with_context(|| {
             format!(
-                "update only modifies existing posts: {} does not exist. Use publish first.",
-                repo_path
+                "update only modifies existing pages: {} does not exist. Use publish first.",
+                wiki_path
             )
         })?;
 
-        self.put_file(repo_path, local_file, message, Some(sha))
+        self.put_file(wiki_path, local_file, message, Some(sha))
     }
 
     fn put_file(
         &self,
-        repo_path: &str,
+        wiki_path: &str,
         local_file: &str,
         message: &str,
         sha: Option<String>,
@@ -185,37 +183,35 @@ impl GithubPagesClient {
         let req = PutFileRequest {
             message,
             content: encoded_content,
-            branch: &self.cfg.branch,
             sha,
         };
 
-        let url = self.contents_url(repo_path);
+        let url = self.contents_url(wiki_path);
         let response = self
             .http
             .put(url)
             .basic_auth(&self.cfg.username, Some(&self.cfg.password))
             .json(&req)
             .send()
-            .context("failed to upload file to GitHub Pages")?;
+            .context("failed to upload file to GitHub Wiki")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
-            bail!("GitHub Pages publish failed ({status}): {body}");
+            bail!("GitHub Wiki publish failed ({status}): {body}");
         }
 
         Ok(())
     }
 
-    fn fetch_existing_sha(&self, repo_path: &str) -> Result<Option<String>> {
-        let url = self.contents_url(repo_path);
+    fn fetch_existing_sha(&self, wiki_path: &str) -> Result<Option<String>> {
+        let url = self.contents_url(wiki_path);
         let response = self
             .http
             .get(url)
-            .query(&[("ref", self.cfg.branch.as_str())])
             .basic_auth(&self.cfg.username, Some(&self.cfg.password))
             .send()
-            .context("failed to query GitHub Pages file")?;
+            .context("failed to query GitHub Wiki file")?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -233,21 +229,21 @@ impl GithubPagesClient {
         Ok(Some(existing.sha))
     }
 
-    fn contents_url(&self, repo_path: &str) -> String {
+    fn contents_url(&self, wiki_path: &str) -> String {
         format!(
-            "https://api.github.com/repos/{}/{}/contents/{}",
-            self.cfg.owner, self.cfg.repo, repo_path
+            "https://api.github.com/repos/{}/{}.wiki/contents/{}",
+            self.cfg.owner, self.cfg.repo, wiki_path
         )
     }
 }
 
-fn validate_blog_path(path: &str) -> Result<()> {
+fn validate_wiki_path(path: &str) -> Result<()> {
     if path.starts_with('/') || path.contains("..") {
-        bail!("invalid blog path: absolute paths and '..' are not allowed");
+        bail!("invalid wiki path: absolute paths and '..' are not allowed");
     }
 
-    if !path.starts_with("posts/") || !path.ends_with(".md") {
-        bail!("path must match posts/*.md for strict permission control");
+    if !path.ends_with(".md") {
+        bail!("path must be a markdown file ending with .md");
     }
 
     Ok(())

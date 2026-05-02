@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 
-pub mod github_pages;
+pub mod github_wiki;
 mod glob_search;
 mod grep_search;
 mod mcp;
@@ -22,7 +22,7 @@ pub use task_registry::TaskRegistry;
 pub use team::{TeamManager, team_tool_handlers};
 pub use todo_write::todo_write_handler;
 
-use self::github_pages::github_pages_publish_handler;
+use self::github_wiki::github_wiki_publish_handler;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ToolDefinition {
@@ -69,10 +69,10 @@ impl GlobalToolRegistry {
     pub fn builtins() -> Self {
         let mut handlers = HashMap::new();
 
-        let github_pages_publish = github_pages_publish_handler();
+        let github_wiki_publish = github_wiki_publish_handler();
         handlers.insert(
-            github_pages_publish.name().to_string(),
-            github_pages_publish,
+            github_wiki_publish.name().to_string(),
+            github_wiki_publish,
         );
 
         let glob_search = glob_search_handler();
