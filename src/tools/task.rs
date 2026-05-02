@@ -11,7 +11,7 @@ use super::{GlobalToolRegistry, TaskRegistry, ToolDefinition, ToolExecutor, Tool
 
 const MAX_TASK_RESULT_CHARS: usize = 50_000;
 const TODO_COORDINATION_CONTRACT: &str = "Planning contract: if this subtask is multi-step, call todo_write early with the full list, keep exactly one item in_progress, and mark completed items promptly.";
-const TASK_ANALYSIS_CONTRACT: &str = "Analysis contract: this assistant can analyze any codebase scope, including multi-repo and microservice architectures. When asked for learning output, prefer tutorial-style, step-by-step documentation. When architecture or execution flow is requested, provide evidence-backed diagram-ready structure (for example Mermaid) and clearly state missing repository/service context instead of guessing.";
+const TASK_ANALYSIS_CONTRACT: &str = "Analysis contract: this assistant can analyze any codebase scope, including multi-repo and microservice architectures. When asked for learning output, prefer tutorial-style, step-by-step documentation. When architecture or execution flow is requested, provide evidence-backed diagram-ready structure (for example Mermaid) and clearly state missing repository/service context instead of guessing. If the task asks to produce a document, write the final markdown to a workspace-relative file with write_file and return the file path.";
 
 #[derive(Debug, Deserialize)]
 struct TaskInput {

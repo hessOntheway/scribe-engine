@@ -141,14 +141,14 @@ pub fn mcp_plugin_tools_from_config() -> Result<Vec<ToolHandler>> {
 fn load_servers_from_config_file() -> Result<Vec<McpServerConfig>> {
     let config_path = Path::new("config/mcp_servers.json");
     if !config_path.exists() {
-        return Ok(vec![default_mermaid_server()]);
+        return Ok(Vec::new());
     }
 
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read MCP config file: {}", config_path.display()))?;
 
     if raw.trim().is_empty() {
-        return Ok(vec![default_mermaid_server()]);
+        return Ok(Vec::new());
     }
 
     serde_json::from_str(&raw).with_context(|| {
@@ -460,17 +460,7 @@ fn normalize_name(raw: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-fn default_mermaid_server() -> McpServerConfig {
-    McpServerConfig {
-        name: "mermaid".to_string(),
-        command: None,
-        args: vec![],
-        env: HashMap::new(),
-        url: Some("https://mcp.mermaid.ai/mcp".to_string()),
-        transport: Some("http".to_string()),
-        headers: HashMap::new(),
-    }
-}
+
 
 fn persist_graph_images(tool_name: &str, result: &mut Value) -> Result<Vec<String>> {
     let Some(content_items) = result.get("content").and_then(|v| v.as_array()) else {

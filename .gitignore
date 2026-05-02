@@ -2,4 +2,5 @@
 .env
 .github/
 .graph/
+.team/
 logs/

@@ -1,10 +1,12 @@
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::config::GithubConfig;
@@ -22,22 +24,17 @@ enum PublishAction {
 struct GithubWikiPublishInput {
     action: PublishAction,
     path: String,
-    file: String,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
     #[serde(default)]
     message: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ExistingFile {
-    sha: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PutFileRequest<'a> {
-    message: &'a str,
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sha: Option<String>,
+enum PublishSource<'a> {
+    File(&'a str),
+    Content(&'a str),
 }
 
 #[derive(Debug)]
@@ -49,7 +46,7 @@ pub struct GithubWikiClient {
 pub fn github_wiki_publish_handler() -> ToolHandler {
     let definition = ToolDefinition {
         name: "github_wiki_publish".to_string(),
-        description: "Publish or update a markdown page in the repository wiki".to_string(),
+        description: "Publish or update a markdown page in the repository wiki from either a local file or direct markdown content".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -64,14 +61,22 @@ pub fn github_wiki_publish_handler() -> ToolHandler {
                 },
                 "file": {
                     "type": "string",
-                    "description": "Local markdown file path to upload"
+                    "description": "Local markdown file path to upload. Optional when content is provided."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Markdown content to write directly into the wiki page. Use this when no local file is needed."
                 },
                 "message": {
                     "type": "string",
                     "description": "Optional commit message"
                 }
             },
-            "required": ["action", "path", "file"],
+            "required": ["action", "path"],
+            "anyOf": [
+                {"required": ["file"]},
+                {"required": ["content"]}
+            ],
             "additionalProperties": false
         }),
     };
@@ -90,13 +95,25 @@ pub fn github_wiki_publish_handler() -> ToolHandler {
             PublishAction::Update => "update wiki page".to_string(),
         });
 
+        let source = resolve_source(input.file.as_deref(), input.content.as_deref())?;
+
         match input.action {
             PublishAction::Publish => {
-                github.publish_page(&input.path, &input.file, &message)?;
+                match source {
+                    PublishSource::File(file) => github.publish_page(&input.path, file, &message)?,
+                    PublishSource::Content(content) => {
+                        github.publish_page_content(&input.path, content, &message)?
+                    }
+                }
                 Ok(format!("published {}", input.path))
             }
             PublishAction::Update => {
-                github.update_page(&input.path, &input.file, &message)?;
+                match source {
+                    PublishSource::File(file) => github.update_page(&input.path, file, &message)?,
+                    PublishSource::Content(content) => {
+                        github.update_page_content(&input.path, content, &message)?
+                    }
+                }
                 Ok(format!("updated {}", input.path))
             }
         }
@@ -145,95 +162,237 @@ impl GithubWikiClient {
 
     pub fn publish_page(&self, wiki_path: &str, local_file: &str, message: &str) -> Result<()> {
         validate_wiki_path(wiki_path)?;
+        ensure_local_file(local_file)?;
 
-        if self.fetch_existing_sha(wiki_path)?.is_some() {
+        let workspace = self.clone_wiki_repo()?;
+        let target = workspace.join(wiki_path);
+        if target.exists() {
             bail!(
                 "publish only creates new pages: {} already exists. Use update instead.",
                 wiki_path
             );
         }
 
-        self.put_file(wiki_path, local_file, message, None)
+        self.write_and_push(&workspace, wiki_path, local_file, message)
+    }
+
+    pub fn publish_page_content(&self, wiki_path: &str, content: &str, message: &str) -> Result<()> {
+        validate_wiki_path(wiki_path)?;
+
+        let workspace = self.clone_wiki_repo()?;
+        let target = workspace.join(wiki_path);
+        if target.exists() {
+            bail!(
+                "publish only creates new pages: {} already exists. Use update instead.",
+                wiki_path
+            );
+        }
+
+        self.write_content_and_push(&workspace, wiki_path, content, message)
     }
 
     pub fn update_page(&self, wiki_path: &str, local_file: &str, message: &str) -> Result<()> {
         validate_wiki_path(wiki_path)?;
+        ensure_local_file(local_file)?;
 
-        let sha = self.fetch_existing_sha(wiki_path)?.with_context(|| {
-            format!(
+        let workspace = self.clone_wiki_repo()?;
+        let target = workspace.join(wiki_path);
+        if !target.exists() {
+            bail!(
                 "update only modifies existing pages: {} does not exist. Use publish first.",
                 wiki_path
-            )
-        })?;
+            );
+        }
 
-        self.put_file(wiki_path, local_file, message, Some(sha))
+        self.write_and_push(&workspace, wiki_path, local_file, message)
     }
 
-    fn put_file(
+    pub fn update_page_content(&self, wiki_path: &str, content: &str, message: &str) -> Result<()> {
+        validate_wiki_path(wiki_path)?;
+
+        let workspace = self.clone_wiki_repo()?;
+        let target = workspace.join(wiki_path);
+        if !target.exists() {
+            bail!(
+                "update only modifies existing pages: {} does not exist. Use publish first.",
+                wiki_path
+            );
+        }
+
+        self.write_content_and_push(&workspace, wiki_path, content, message)
+    }
+
+    fn write_and_push(
         &self,
+        workspace: &Path,
         wiki_path: &str,
         local_file: &str,
         message: &str,
-        sha: Option<String>,
     ) -> Result<()> {
-        let content = fs::read_to_string(local_file)
-            .with_context(|| format!("failed to read local file: {}", local_file))?;
-        let encoded_content = STANDARD.encode(content.as_bytes());
-
-        let req = PutFileRequest {
-            message,
-            content: encoded_content,
-            sha,
-        };
-
-        let url = self.contents_url(wiki_path);
-        let response = self
-            .http
-            .put(url)
-            .basic_auth(&self.cfg.username, Some(&self.cfg.password))
-            .json(&req)
-            .send()
-            .context("failed to upload file to GitHub Wiki")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
-            bail!("GitHub Wiki publish failed ({status}): {body}");
+        let target = workspace.join(wiki_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create wiki dir: {}", parent.display()))?;
         }
+        fs::copy(local_file, &target).with_context(|| {
+            format!(
+                "failed to copy local file {} to wiki path {}",
+                local_file,
+                target.display()
+            )
+        })?;
+
+        self.run_git(
+            workspace,
+            &["add", wiki_path],
+            "failed to stage wiki file",
+        )?;
+
+        let commit = Command::new("git")
+            .current_dir(workspace)
+            .arg("-c")
+            .arg(format!("user.name={}", self.cfg.username))
+            .arg("-c")
+            .arg(format!("user.email={}@users.noreply.github.com", self.cfg.username))
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .output()
+            .context("failed to run git commit")?;
+
+        if !commit.status.success() {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            let stdout = String::from_utf8_lossy(&commit.stdout);
+            let combined = format!("{}{}", stdout, stderr);
+            if combined.contains("nothing to commit") {
+                return Ok(());
+            }
+            bail!("failed to commit wiki change: {}", combined.trim());
+        }
+
+        self.run_git(workspace, &["push", "origin", "master"], "failed to push wiki changes")?;
 
         Ok(())
     }
 
-    fn fetch_existing_sha(&self, wiki_path: &str) -> Result<Option<String>> {
-        let url = self.contents_url(wiki_path);
-        let response = self
-            .http
-            .get(url)
-            .basic_auth(&self.cfg.username, Some(&self.cfg.password))
-            .send()
-            .context("failed to query GitHub Wiki file")?;
+    fn write_content_and_push(
+        &self,
+        workspace: &Path,
+        wiki_path: &str,
+        content: &str,
+        message: &str,
+    ) -> Result<()> {
+        let target = workspace.join(wiki_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create wiki dir: {}", parent.display()))?;
+        }
+        fs::write(&target, content)
+            .with_context(|| format!("failed to write wiki content to {}", target.display()))?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        self.run_git(
+            workspace,
+            &["add", wiki_path],
+            "failed to stage wiki file",
+        )?;
+
+        let commit = Command::new("git")
+            .current_dir(workspace)
+            .arg("-c")
+            .arg(format!("user.name={}", self.cfg.username))
+            .arg("-c")
+            .arg(format!("user.email={}@users.noreply.github.com", self.cfg.username))
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .output()
+            .context("failed to run git commit")?;
+
+        if !commit.status.success() {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            let stdout = String::from_utf8_lossy(&commit.stdout);
+            let combined = format!("{}{}", stdout, stderr);
+            if combined.contains("nothing to commit") {
+                return Ok(());
+            }
+            bail!("failed to commit wiki change: {}", combined.trim());
         }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
-            bail!("GitHub query failed ({status}): {body}");
-        }
+        self.run_git(workspace, &["push", "origin", "master"], "failed to push wiki changes")?;
 
-        let existing: ExistingFile = response
-            .json()
-            .context("failed to parse GitHub content response")?;
-        Ok(Some(existing.sha))
+        Ok(())
     }
 
-    fn contents_url(&self, wiki_path: &str) -> String {
+    fn clone_wiki_repo(&self) -> Result<PathBuf> {
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let workspace = std::env::temp_dir().join(format!(
+            "scribe-wiki-{}-{}",
+            ts_ms, pid
+        ));
+
+        let remote = self.wiki_remote_url();
+        self.run_git(
+            Path::new("."),
+            &["clone", &remote, workspace.to_string_lossy().as_ref()],
+            "failed to clone wiki repository",
+        )?;
+
+        Ok(workspace)
+    }
+
+    fn wiki_remote_url(&self) -> String {
         format!(
-            "https://api.github.com/repos/{}/{}.wiki/contents/{}",
-            self.cfg.owner, self.cfg.repo, wiki_path
+            "https://{}:{}@github.com/{}/{}.wiki.git",
+            self.cfg.username, self.cfg.password, self.cfg.owner, self.cfg.repo
         )
+    }
+
+    fn run_git(&self, cwd: &Path, args: &[&str], context_msg: &str) -> Result<()> {
+        let output = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .with_context(|| format!("{}: git {}", context_msg, args.join(" ")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            bail!(
+                "{}: {}{}",
+                context_msg,
+                stdout.trim(),
+                if stderr.trim().is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" {}", stderr.trim())
+                }
+            );
+        }
+
+        Ok(())
+    }
+}
+
+fn ensure_local_file(path: &str) -> Result<()> {
+    let metadata = fs::metadata(path).with_context(|| format!("failed to stat local file: {}", path))?;
+    if !metadata.is_file() {
+        bail!("local path must point to a file: {}", path);
+    }
+    Ok(())
+}
+
+fn resolve_source<'a>(file: Option<&'a str>, content: Option<&'a str>) -> Result<PublishSource<'a>> {
+    match (file, content) {
+        (Some(file), _) => {
+            ensure_local_file(file)?;
+            Ok(PublishSource::File(file))
+        }
+        (None, Some(content)) => Ok(PublishSource::Content(content)),
+        (None, None) => bail!("github_wiki_publish requires either file or content"),
     }
 }
 

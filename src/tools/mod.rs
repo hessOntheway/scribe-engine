@@ -10,6 +10,7 @@ mod glob_search;
 mod grep_search;
 mod mcp;
 mod read_file;
+mod write_file;
 pub mod team;
 mod task_registry;
 mod todo_write;
@@ -21,6 +22,7 @@ pub use read_file::read_file_handler;
 pub use task_registry::TaskRegistry;
 pub use team::{TeamManager, team_tool_handlers};
 pub use todo_write::todo_write_handler;
+pub use write_file::write_file_handler;
 
 use self::github_wiki::github_wiki_publish_handler;
 
@@ -83,6 +85,9 @@ impl GlobalToolRegistry {
 
         let read_file = read_file_handler();
         handlers.insert(read_file.name().to_string(), read_file);
+
+        let write_file = write_file_handler();
+        handlers.insert(write_file.name().to_string(), write_file);
 
         let todo_write = todo_write_handler();
         handlers.insert(todo_write.name().to_string(), todo_write);

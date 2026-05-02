@@ -64,10 +64,15 @@ fn main() -> Result<()> {
             let llm_cfg = LlmConfig::from_env()?;
             let llm = Arc::new(OpenAiCompatClient::new(llm_cfg)?);
             let base_registry = build_registry()?;
+            let ask_registry = if github_auth_available() {
+                base_registry
+            } else {
+                base_registry.without_tool("github_wiki_publish")
+            };
             let shared_agent_loop = Arc::new(crate::runtime::AgentLoop::new(Arc::clone(&llm), max_steps));
             let task_registry = Arc::new(TaskRegistry::new());
 
-            let team_child_registry = Arc::new(base_registry.without_tool("task"));
+            let team_child_registry = Arc::new(ask_registry.without_tool("task"));
             let task_tool = task_handler(
                 Arc::clone(&shared_agent_loop),
                 Arc::clone(&team_child_registry),
@@ -84,7 +89,7 @@ fn main() -> Result<()> {
                 Arc::clone(&task_registry),
             );
 
-            let mut parent_registry = base_registry.with_tool(task_tool)?;
+            let mut parent_registry = ask_registry.with_tool(task_tool)?;
             for tool in task_query_tools {
                 parent_registry = parent_registry.with_tool(tool)?;
             }
@@ -112,4 +117,8 @@ fn init_github_client() -> Result<GithubWikiClient> {
     let github = GithubWikiClient::new(github_cfg)?;
     github.auth_check()?;
     Ok(github)
+}
+
+fn github_auth_available() -> bool {
+    std::env::var("GITHUB_USERNAME").is_ok() && std::env::var("GITHUB_PASSWORD").is_ok()
 }
