@@ -184,18 +184,6 @@ fn clear_store_file(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub fn has_persisted_active_todos() -> bool {
-    let path = resolve_store_path();
-    let todos = match load_todos_from_path(&path) {
-        Ok(items) => items,
-        Err(_) => return false,
-    };
-
-    todos
-        .iter()
-        .any(|item| item.status == TodoStatus::Pending || item.status == TodoStatus::InProgress)
-}
-
 pub fn todo_write_handler() -> ToolHandler {
     let definition = ToolDefinition {
         name: "todo_write".to_string(),

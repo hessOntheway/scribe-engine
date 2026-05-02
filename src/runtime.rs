@@ -6,10 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact::{apply_micro_compact, auto_compact_if_needed};
 use crate::llm::openai::OpenAiCompatClient;
-use crate::tools::{GlobalToolRegistry, has_persisted_active_todos};
-
-const TODO_REMINDER_THRESHOLD: usize = 3;
-const TODO_REMINDER_MESSAGE: &str = "For multi-step work, update todo_write with the full task list, keep exactly one in_progress task, and mark completed tasks promptly.";
+use crate::tools::GlobalToolRegistry;
 static SUBAGENT_AUDIT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct AgentLoop {
@@ -62,11 +59,6 @@ impl AgentLoop {
 
         let tool_definitions = tool_registry.definitions();
         let compact_cfg = self.llm.context_compact_config().clone();
-        let mut rounds_without_todo_update = if has_persisted_active_todos() {
-            TODO_REMINDER_THRESHOLD.saturating_sub(1)
-        } else {
-            0
-        };
         let mut messages: Vec<Value> = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": user_prompt}),
@@ -115,7 +107,6 @@ impl AgentLoop {
                 return Ok(content);
             }
 
-            let mut todo_updated_in_round = false;
             for call in tool_calls {
                 let tool_id = call
                     .get("id")
@@ -134,10 +125,6 @@ impl AgentLoop {
                     .and_then(|v| v.as_str())
                     .context("tool function arguments missing")?;
 
-                if name == "todo_write" {
-                    todo_updated_in_round = true;
-                }
-
                 let result = match tool_registry.execute(name, arguments) {
                     Ok(output) => output,
                     Err(err) => format!("tool_error: {}", err),
@@ -148,19 +135,6 @@ impl AgentLoop {
                     "tool_call_id": tool_id,
                     "content": result,
                 }));
-            }
-
-            if todo_updated_in_round {
-                rounds_without_todo_update = 0;
-            } else {
-                rounds_without_todo_update += 1;
-                if rounds_without_todo_update >= TODO_REMINDER_THRESHOLD {
-                    messages.push(json!({
-                        "role": "user",
-                        "content": TODO_REMINDER_MESSAGE,
-                    }));
-                    rounds_without_todo_update = 0;
-                }
             }
         }
 

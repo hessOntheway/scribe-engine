@@ -154,9 +154,18 @@ fn resolve_file_path(workspace_root: &Path, path: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::fs::{create_dir_all, write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn unique_workspace() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("scribe-read-file-test-{}", uuid::Uuid::new_v4()));
+        let ts_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0); 
+        let seq = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("scribe-read-file-test-{ts_nanos}-{seq}"));
         create_dir_all(&dir).expect("create temp workspace");
         dir
     }

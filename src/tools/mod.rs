@@ -20,7 +20,6 @@ pub use mcp::mcp_plugin_tools_from_config;
 pub use read_file::read_file_handler;
 pub use task_registry::TaskRegistry;
 pub use team::{TeamManager, team_tool_handlers};
-pub use todo_write::has_persisted_active_todos;
 pub use todo_write::todo_write_handler;
 
 use self::github_pages::github_pages_publish_handler;
