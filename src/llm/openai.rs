@@ -33,6 +33,7 @@ const SYSTEM_PROMPT: &str = r#"You are a code and architecture analysis assistan
 - Report verification status faithfully. If checks were not run or failed, say so explicitly.
 
 # Tool Protocol
+- Use read_file when you need the exact contents of a file, and use search tools when locating files or symbols.
 - Use tools when they improve accuracy or are required by the request.
 - For tool calls, provide strict JSON arguments only.
 - For multi-step work, call todo_write early with the full task list, keep exactly one task in_progress, and mark completed tasks promptly.

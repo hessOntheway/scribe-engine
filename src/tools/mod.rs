@@ -9,6 +9,7 @@ pub mod github_pages;
 mod glob_search;
 mod grep_search;
 mod mcp;
+mod read_file;
 pub mod team;
 mod task_registry;
 mod todo_write;
@@ -16,6 +17,7 @@ mod todo_write;
 pub use glob_search::glob_search_handler;
 pub use grep_search::grep_search_handler;
 pub use mcp::mcp_plugin_tools_from_config;
+pub use read_file::read_file_handler;
 pub use task_registry::TaskRegistry;
 pub use team::{TeamManager, team_tool_handlers};
 pub use todo_write::has_persisted_active_todos;
@@ -79,6 +81,9 @@ impl GlobalToolRegistry {
 
         let grep_search = grep_search_handler();
         handlers.insert(grep_search.name().to_string(), grep_search);
+
+        let read_file = read_file_handler();
+        handlers.insert(read_file.name().to_string(), read_file);
 
         let todo_write = todo_write_handler();
         handlers.insert(todo_write.name().to_string(), todo_write);
