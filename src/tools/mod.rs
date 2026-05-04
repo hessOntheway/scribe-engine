@@ -12,14 +12,13 @@ mod mcp;
 mod read_file;
 mod write_file;
 pub mod team;
-mod task_registry;
 mod todo_write;
 
 pub use glob_search::glob_search_handler;
 pub use grep_search::grep_search_handler;
 pub use mcp::mcp_plugin_tools_from_config;
 pub use read_file::read_file_handler;
-pub use task_registry::TaskRegistry;
+pub use task::TaskRegistry;
 pub use team::{TeamManager, team_tool_handlers};
 pub use todo_write::todo_write_handler;
 pub use write_file::write_file_handler;

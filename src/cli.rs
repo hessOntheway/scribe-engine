@@ -50,9 +50,6 @@ pub enum Command {
     },
     /// Ask the model to plan/execute with registered tools.
     Ask {
-        /// User prompt sent to the model.
-        #[arg(long)]
-        prompt: String,
         /// Maximum model-tool turns.
         #[arg(long, default_value_t = 6)]
         max_steps: usize,

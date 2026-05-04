@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact::{apply_micro_compact, auto_compact_if_needed};
 use crate::llm::openai::OpenAiCompatClient;
+use crate::llm::session::ConversationSession;
 use crate::tools::GlobalToolRegistry;
 static SUBAGENT_AUDIT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -19,12 +20,12 @@ impl AgentLoop {
         Self { llm, max_steps }
     }
 
-    pub fn run_turn(
+    pub fn run_session_turn(
         &self,
-        user_prompt: &str,
+        session: &mut ConversationSession,
         tool_registry: &GlobalToolRegistry,
     ) -> Result<String> {
-        self.run_with_system_prompt(user_prompt, self.llm.system_prompt(), tool_registry, None)
+        self.run_message_loop(session.messages_mut(), tool_registry, None)
     }
 
     pub fn run_subagent(
@@ -38,18 +39,17 @@ impl AgentLoop {
             None
         };
 
-        self.run_with_system_prompt(
-            user_prompt,
-            self.llm.subagent_system_prompt(),
-            tool_registry,
-            audit_path.as_deref(),
-        )
+        let mut messages: Vec<Value> = vec![
+            json!({"role": "system", "content": self.llm.subagent_system_prompt()}),
+            json!({"role": "user", "content": user_prompt}),
+        ];
+
+        self.run_message_loop(&mut messages, tool_registry, audit_path.as_deref())
     }
 
-    fn run_with_system_prompt(
+    fn run_message_loop(
         &self,
-        user_prompt: &str,
-        system_prompt: &str,
+        messages: &mut Vec<Value>,
         tool_registry: &GlobalToolRegistry,
         audit_log_path_override: Option<&str>,
     ) -> Result<String> {
@@ -59,14 +59,10 @@ impl AgentLoop {
 
         let tool_definitions = tool_registry.definitions();
         let compact_cfg = self.llm.context_compact_config().clone();
-        let mut messages: Vec<Value> = vec![
-            json!({"role": "system", "content": system_prompt}),
-            json!({"role": "user", "content": user_prompt}),
-        ];
 
         for _ in 0..self.max_steps {
-            apply_micro_compact(&mut messages, &compact_cfg);
-            if let Some(event) = auto_compact_if_needed(&mut messages, &compact_cfg, self.llm.as_ref(), audit_log_path_override)? {
+            apply_micro_compact(messages, &compact_cfg);
+            if let Some(event) = auto_compact_if_needed(messages, &compact_cfg, self.llm.as_ref(), audit_log_path_override)? {
                 let transcript = event
                     .transcript_path
                     .as_ref()
@@ -171,8 +167,8 @@ impl ConversationRuntime {
         }
     }
 
-    pub fn run_turn(&self, user_prompt: &str) -> Result<String> {
+    pub fn run_session_turn(&self, session: &mut ConversationSession) -> Result<String> {
         self.agent_loop
-            .run_turn(user_prompt, self.tool_registry.as_ref())
+            .run_session_turn(session, self.tool_registry.as_ref())
     }
 }

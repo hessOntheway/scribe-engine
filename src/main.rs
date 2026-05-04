@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::cli::{Cli, Command};
 use crate::config::{GithubConfig, LlmConfig};
 use crate::llm::openai::OpenAiCompatClient;
+use crate::llm::session::ConversationSession;
 use crate::runtime::ConversationRuntime;
 use crate::tools::github_wiki::GithubWikiClient;
 use crate::tools::task::{task_handler, task_query_handlers};
@@ -60,15 +61,20 @@ fn main() -> Result<()> {
             println!("successfully synced wiki file: {}", path);
             Ok(())
         }
-        Command::Ask { prompt, max_steps } => {
+        Command::Ask { max_steps } => {
+            use std::io::{self, BufRead};
+
             let llm_cfg = LlmConfig::from_env()?;
             let llm = Arc::new(OpenAiCompatClient::new(llm_cfg)?);
+            let transcript_dir = llm.context_compact_config().transcript_dir.clone();
+
             let base_registry = build_registry()?;
             let ask_registry = if github_auth_available() {
                 base_registry
             } else {
                 base_registry.without_tool("github_wiki_publish")
             };
+
             let shared_agent_loop = Arc::new(crate::runtime::AgentLoop::new(Arc::clone(&llm), max_steps));
             let task_registry = Arc::new(TaskRegistry::new());
 
@@ -97,11 +103,46 @@ fn main() -> Result<()> {
                 parent_registry = parent_registry.with_tool(tool)?;
             }
             let parent_registry = Arc::new(parent_registry);
-            let runtime =
-                ConversationRuntime::new(Arc::clone(&llm), Arc::clone(&parent_registry), max_steps);
-            let answer = runtime.run_turn(&prompt)?;
+            let runtime = ConversationRuntime::new(Arc::clone(&llm), Arc::clone(&parent_registry), max_steps);
 
-            println!("{}", answer);
+            let stdin = io::stdin();
+            let mut lines = stdin.lock().lines();
+            println!("Enter your request, then press Enter:");
+            let first_prompt = match lines.next() {
+                Some(Ok(user_input)) if !user_input.trim().is_empty() => user_input,
+                _ => return Ok(()),
+            };
+
+            let mut session = match std::env::var("ASK_SESSION_PATH") {
+                Ok(session_path) => {
+                    let mut loaded = ConversationSession::load(session_path)?;
+                    loaded.append_user_prompt(first_prompt);
+                    loaded
+                }
+                Err(_) => ConversationSession::new(first_prompt, llm.system_prompt(), &transcript_dir)?,
+            };
+            session.save()?;
+
+            loop {
+                let answer = runtime.run_session_turn(&mut session)?;
+                println!("{}", answer);
+                session.save()?;
+
+                if ConversationSession::extract_user_prompt(&answer).is_some() {
+                    println!("\n(Waiting for your input. Type your response and press Enter.)");
+                    match lines.next() {
+                        Some(Ok(user_input)) => {
+                            session.append_user_prompt(user_input);
+                            session.save()?;
+                            continue;
+                        }
+                        _ => break,
+                    }
+                } else {
+                    break;
+                }
+            }
+
             Ok(())
         }
     }

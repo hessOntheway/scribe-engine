@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::runtime::AgentLoop;
 
-use super::task_registry::TaskStatus;
+use super::task::TaskStatus;
 use super::{GlobalToolRegistry, TaskRegistry, ToolDefinition, ToolExecutor, ToolHandler};
 
 const TEAM_LOOP_IDLE_MS: u64 = 400;
