@@ -41,7 +41,7 @@ pub fn read_file_handler() -> ToolHandler {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative file path. Absolute paths and '..' segments are rejected."
+                    "description": "File path (absolute or workspace-relative). '..' segments are rejected."
                 },
                 "start_line": {
                     "type": "integer",
@@ -126,22 +126,19 @@ fn run_read_file(input: &ReadFileInput) -> Result<ReadFileOutput> {
 fn resolve_file_path(workspace_root: &Path, path: &str) -> Result<PathBuf> {
     let candidate = Path::new(path);
 
-    if candidate.is_absolute() {
-        bail!("absolute paths are not allowed");
-    }
+    // Support both absolute and relative paths (claw-code style)
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        if candidate.components().any(|component| matches!(component, Component::ParentDir)) {
+            bail!("'..' path segments are not allowed");
+        }
+        workspace_root.join(candidate)
+    };
 
-    if candidate.components().any(|component| matches!(component, Component::ParentDir)) {
-        bail!("'..' path segments are not allowed");
-    }
-
-    let joined = workspace_root.join(candidate);
     let canonical = joined
         .canonicalize()
         .with_context(|| format!("failed to resolve path: {}", joined.display()))?;
-
-    if !canonical.starts_with(workspace_root) {
-        bail!("path escapes the workspace root");
-    }
 
     if !canonical.is_file() {
         bail!("path does not point to a regular file: {}", canonical.display());

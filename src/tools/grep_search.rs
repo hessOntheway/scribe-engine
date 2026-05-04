@@ -99,7 +99,7 @@ pub fn grep_search_handler() -> ToolHandler {
 }
 
 fn run_grep_search(input: &GrepSearchInput) -> Result<GrepSearchOutput> {
-    let root = input.path.clone().unwrap_or_else(|| ".".to_string());
+    let root = normalize_search_path(input.path.as_deref())?;
     let pattern = if input.is_regexp {
         input.pattern.clone()
     } else {
@@ -171,4 +171,22 @@ fn run_grep_search(input: &GrepSearchInput) -> Result<GrepSearchOutput> {
         truncated: false,
         matches,
     })
+}
+
+fn normalize_search_path(path: Option<&str>) -> Result<String> {
+    use std::path::PathBuf;
+    let candidate = match path {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from("."),
+    };
+
+    let absolute = if candidate.is_absolute() {
+        candidate
+    } else {
+        std::env::current_dir()
+            .context("failed to get current directory")?
+            .join(candidate)
+    };
+
+    Ok(absolute.to_string_lossy().to_string())
 }

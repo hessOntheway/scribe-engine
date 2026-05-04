@@ -121,25 +121,29 @@ fn main() -> Result<()> {
                 }
                 Err(_) => ConversationSession::new(first_prompt, llm.system_prompt(), &transcript_dir)?,
             };
+            // soft limits disabled for now; controlling via --max-steps only
             session.save()?;
 
             loop {
+                // no session-level soft-limit enforcement; per-turn max_steps controls execution
                 let answer = runtime.run_session_turn(&mut session)?;
                 println!("{}", answer);
                 session.save()?;
 
-                if ConversationSession::extract_user_prompt(&answer).is_some() {
+                let awaiting_follow_up = ConversationSession::extract_user_prompt(&answer).is_some();
+                if awaiting_follow_up {
                     println!("\n(Waiting for your input. Type your response and press Enter.)");
-                    match lines.next() {
-                        Some(Ok(user_input)) => {
-                            session.append_user_prompt(user_input);
-                            session.save()?;
-                            continue;
-                        }
-                        _ => break,
-                    }
                 } else {
-                    break;
+                    println!("\n(Enter a new request to continue the same session, or an empty line to exit.)");
+                }
+
+                match lines.next() {
+                    Some(Ok(user_input)) if !user_input.trim().is_empty() => {
+                        session.append_user_prompt(user_input);
+                        session.save()?;
+                        continue;
+                    }
+                    _ => break,
                 }
             }
 

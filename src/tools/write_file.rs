@@ -21,7 +21,7 @@ pub fn write_file_handler() -> ToolHandler {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative output path. Absolute paths and '..' are rejected."
+                    "description": "Output path (absolute or workspace-relative). '..' segments are rejected."
                 },
                 "content": {
                     "type": "string",
@@ -57,14 +57,23 @@ pub fn write_file_handler() -> ToolHandler {
 }
 
 fn validate_write_path(path: &str) -> Result<std::path::PathBuf> {
-    if path.starts_with('/') || path.contains("..") {
-        bail!("invalid write_file path: absolute paths and '..' are not allowed");
+    if path.contains("..") {
+        bail!("invalid write_file path: '..' segments are not allowed");
     }
 
-    let normalized = std::path::Path::new(path).to_path_buf();
-    if normalized.as_os_str().is_empty() {
+    let candidate = std::path::Path::new(path);
+    if candidate.as_os_str().is_empty() {
         bail!("write_file path cannot be empty");
     }
 
-    Ok(normalized)
+    // Support both absolute and relative paths (claw-code style)
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to get current directory")?
+            .join(candidate)
+    };
+
+    Ok(absolute)
 }
