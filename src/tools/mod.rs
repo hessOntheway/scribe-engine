@@ -10,6 +10,7 @@ mod glob_search;
 mod grep_search;
 mod mcp;
 mod read_file;
+mod web_fetch;
 mod write_file;
 pub mod team;
 mod todo_write;
@@ -19,6 +20,7 @@ pub use grep_search::grep_search_handler;
 pub use mcp::mcp_plugin_tools_from_config;
 pub use read_file::read_file_handler;
 pub use task::TaskRegistry;
+pub use web_fetch::web_fetch_handler;
 pub use team::{TeamManager, team_tool_handlers};
 pub use todo_write::todo_write_handler;
 pub use write_file::write_file_handler;
@@ -84,6 +86,9 @@ impl GlobalToolRegistry {
 
         let read_file = read_file_handler();
         handlers.insert(read_file.name().to_string(), read_file);
+
+        let web_fetch = web_fetch_handler();
+        handlers.insert(web_fetch.name().to_string(), web_fetch);
 
         let write_file = write_file_handler();
         handlers.insert(write_file.name().to_string(), write_file);
