@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::llm::usage::PromptCacheStats;
+
 const USER_PROMPT_PREFIX: &str = "USER_PROMPT:";
 const SESSION_SCHEMA_VERSION: u32 = 1;
 
@@ -17,6 +19,8 @@ pub struct ConversationSessionSnapshot {
     pub updated_at_unix_ms: u128,
     pub prompt_history: Vec<String>,
     pub messages: Vec<Value>,
+    #[serde(default)]
+    pub prompt_cache_stats: PromptCacheStats,
 }
 
 pub struct ConversationSession {
@@ -40,6 +44,7 @@ impl ConversationSession {
             updated_at_unix_ms: created_at_unix_ms,
             prompt_history: vec![initial_prompt],
             messages,
+            prompt_cache_stats: PromptCacheStats::default(),
         };
 
         let session_path = session_snapshot_path(transcript_dir, &session_id);
@@ -64,8 +69,11 @@ impl ConversationSession {
         Ok(Self { snapshot, session_path })
     }
 
-    pub fn messages_mut(&mut self) -> &mut Vec<Value> {
-        &mut self.snapshot.messages
+    pub fn messages_and_prompt_cache_stats_mut(
+        &mut self,
+    ) -> (&mut Vec<Value>, &mut PromptCacheStats) {
+        let snapshot = &mut self.snapshot;
+        (&mut snapshot.messages, &mut snapshot.prompt_cache_stats)
     }
 
     pub fn append_user_prompt(&mut self, prompt: String) {

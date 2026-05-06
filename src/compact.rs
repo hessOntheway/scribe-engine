@@ -9,10 +9,11 @@ use serde_json::{Value, json};
 
 use crate::config::ContextCompactConfig;
 use crate::llm::openai::OpenAiCompatClient;
+use crate::llm::usage::PromptCacheStats;
+use crate::tools::ToolDefinition;
 
 const COMPACTED_TOOL_RESULT_NOTICE: &str = "[Previous tool_result compacted]";
 const CONTINUATION_PREFIX: &str = "[Context compacted]";
-const COMPACT_SUMMARY_SYSTEM_PROMPT: &str = "You summarize an agent conversation for future continuity. Preserve only durable context: current goal, completed work, open tasks, important file paths, tool usage, and unresolved decisions. Do not invent facts. Do not mention that you are summarizing. Output plain text only.";
 const MAX_SUMMARY_SOURCE_CHARS: usize = 60_000;
 
 #[derive(Debug, Clone)]
@@ -90,6 +91,8 @@ pub fn auto_compact_if_needed(
     cfg: &ContextCompactConfig,
     llm: &OpenAiCompatClient,
     audit_log_path_override: Option<&str>,
+    tool_definitions: &[crate::tools::ToolDefinition],
+    prompt_cache_stats: Option<&mut PromptCacheStats>,
 ) -> Result<Option<AutoCompactEvent>> {
     if !cfg.enabled {
         return Ok(None);
@@ -121,7 +124,14 @@ pub fn auto_compact_if_needed(
         .saturating_sub(cfg.auto_preserve_recent_messages);
     let removed = messages[..keep_from].to_vec();
     let summary_source = build_compact_summary_source(&removed);
-    let summary = match generate_compact_summary(llm, &summary_source, audit_log_path_override) {
+    let summary = match generate_compact_summary(
+        llm,
+        messages,
+        &summary_source,
+        tool_definitions,
+        audit_log_path_override,
+        prompt_cache_stats,
+    ) {
         Ok(summary) => summary,
         Err(err) => {
             eprintln!("warn: failed to generate compact summary: {err}");
@@ -148,21 +158,29 @@ pub fn auto_compact_if_needed(
 
 fn generate_compact_summary(
     llm: &OpenAiCompatClient,
+    history_messages: &[Value],
     summary_source: &str,
+    tool_definitions: &[ToolDefinition],
     audit_log_path_override: Option<&str>,
+    prompt_cache_stats: Option<&mut PromptCacheStats>,
 ) -> Result<String> {
-    let messages = vec![
-        json!({"role": "system", "content": COMPACT_SUMMARY_SYSTEM_PROMPT}),
-        json!({
-            "role": "user",
-            "content": format!(
-                "Summarize the conversation below into a compact continuity note. Keep it brief but useful. Use short sections or bullets if helpful.\n\nTRANSCRIPT START\n{summary_source}\nTRANSCRIPT END"
-            )
-        }),
-    ];
+    let mut messages = history_messages.to_vec();
+    messages.push(json!({
+        "role": "user",
+        "content": format!(
+            "Compress the conversation above into a short summary that preserves the current goal, completed work, open tasks, important file paths, tool usage, and unresolved decisions. Output the summary plainly without extra commentary.\n\nTRANSCRIPT START\n{summary_source}\nTRANSCRIPT END"
+        )
+    }));
 
-    let response = llm.create_chat_completion_with_audit_path(&messages, &[], audit_log_path_override)?;
+    let response = llm.create_chat_completion_with_audit_path(&messages, tool_definitions, audit_log_path_override)?;
+
+    if let Some(stats) = prompt_cache_stats {
+        stats.record_usage(&response.usage);
+        eprintln!("{}", stats.summary_line());
+    }
+
     response
+        .message
         .get("content")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -338,11 +356,13 @@ mod tests {
             model: "gpt-4.1-mini".to_string(),
             write_model_audit_log: false,
             model_audit_log_path: ".auditlog/llm_response_audit.json".to_string(),
+            enable_prompt_cache: false,
+            prompt_cache_dir: ".cache/prompt_cache".to_string(),
             context_compact: cfg.clone(),
         })
         .expect("llm client should build");
 
-        let result = auto_compact_if_needed(&mut messages, &cfg, &llm, None);
+        let result = auto_compact_if_needed(&mut messages, &cfg, &llm, None, &[], None);
         assert!(result.is_err() || result.ok().flatten().is_none());
     }
 }

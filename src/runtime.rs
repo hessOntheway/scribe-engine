@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::compact::{apply_micro_compact, auto_compact_if_needed};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::llm::session::ConversationSession;
+use crate::llm::usage::PromptCacheStats;
 use crate::tools::GlobalToolRegistry;
 static SUBAGENT_AUDIT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -25,7 +26,8 @@ impl AgentLoop {
         session: &mut ConversationSession,
         tool_registry: &GlobalToolRegistry,
     ) -> Result<String> {
-        self.run_message_loop(session.messages_mut(), tool_registry, None)
+        let (messages, prompt_cache_stats) = session.messages_and_prompt_cache_stats_mut();
+        self.run_message_loop(messages, tool_registry, None, Some(prompt_cache_stats))
     }
 
     pub fn run_subagent(
@@ -44,7 +46,7 @@ impl AgentLoop {
             json!({"role": "user", "content": user_prompt}),
         ];
 
-        self.run_message_loop(&mut messages, tool_registry, audit_path.as_deref())
+        self.run_message_loop(&mut messages, tool_registry, audit_path.as_deref(), None)
     }
 
     fn run_message_loop(
@@ -52,6 +54,7 @@ impl AgentLoop {
         messages: &mut Vec<Value>,
         tool_registry: &GlobalToolRegistry,
         audit_log_path_override: Option<&str>,
+        prompt_cache_stats: Option<&mut PromptCacheStats>,
     ) -> Result<String> {
         if self.max_steps == 0 {
             bail!("max_steps must be greater than 0");
@@ -59,10 +62,18 @@ impl AgentLoop {
 
         let tool_definitions = tool_registry.definitions();
         let compact_cfg = self.llm.context_compact_config().clone();
+        let mut prompt_cache_stats = prompt_cache_stats;
 
         for _ in 0..self.max_steps {
             apply_micro_compact(messages, &compact_cfg);
-            if let Some(event) = auto_compact_if_needed(messages, &compact_cfg, self.llm.as_ref(), audit_log_path_override)? {
+            if let Some(event) = auto_compact_if_needed(
+                messages,
+                &compact_cfg,
+                self.llm.as_ref(),
+                audit_log_path_override,
+                &tool_definitions,
+                prompt_cache_stats.as_mut().map(|stats| &mut **stats),
+            )? {
                 let transcript = event
                     .transcript_path
                     .as_ref()
@@ -81,9 +92,20 @@ impl AgentLoop {
                     &tool_definitions,
                     audit_log_path_override,
                 )?;
-            messages.push(assistant.clone());
+
+            if let Some(stats) = prompt_cache_stats.as_mut() {
+                if assistant.cached {
+                    (**stats).record_local_cache_hit();
+                } else {
+                    (**stats).record_usage(&assistant.usage);
+                }
+                eprintln!("{}", (**stats).summary_line());
+            }
+
+            messages.push(assistant.message.clone());
 
             let tool_calls = assistant
+                .message
                 .get("tool_calls")
                 .and_then(|v| v.as_array())
                 .cloned()
@@ -91,6 +113,7 @@ impl AgentLoop {
 
             if tool_calls.is_empty() {
                 let content = assistant
+                    .message
                     .get("content")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")

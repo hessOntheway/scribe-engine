@@ -7,9 +7,12 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::config::ContextCompactConfig;
 use crate::config::LlmConfig;
+use crate::llm::cache::PromptCache;
+use crate::llm::usage::ModelUsage;
 use crate::tools::ToolDefinition;
 
 const SYSTEM_PROMPT: &str = r#"You are a code and architecture analysis assistant for software projects.
@@ -29,6 +32,7 @@ const SYSTEM_PROMPT: &str = r#"You are a code and architecture analysis assistan
 # Working Style
 - Read relevant code before changing it.
 - Keep edits tightly scoped to the request.
+- Keep the static request prefix stable: do not rewrite the system prompt or tool set mid-session; put changing state into messages or tool results instead.
 - Do not add speculative abstractions, compatibility shims, or unrelated cleanup.
 - Report verification status faithfully. If checks were not run or failed, say so explicitly.
 
@@ -58,6 +62,7 @@ const SUBAGENT_SYSTEM_PROMPT: &str = r#"You are a subagent for this repository.
 - For tool calls, provide strict JSON arguments only.
 - Do not include internal tool traces unless they are necessary to support correctness.
 - Never invent facts; if evidence is missing, state uncertainty briefly.
+- Keep the static request prefix stable: do not rewrite the system prompt or tool set mid-session; put changing state into messages or tool results instead.
 - If asked for architecture or flow outputs, provide precise, evidence-backed structure that can be rendered as diagrams.
 
 # Planning
@@ -69,6 +74,14 @@ const SUBAGENT_SYSTEM_PROMPT: &str = r#"You are a subagent for this repository.
 pub struct OpenAiCompatClient {
     http: Client,
     cfg: LlmConfig,
+    cache: Option<PromptCache>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatCompletionResult {
+    pub message: Value,
+    pub usage: ModelUsage,
+    pub cached: bool,
 }
 
 impl OpenAiCompatClient {
@@ -85,7 +98,13 @@ impl OpenAiCompatClient {
             .build()
             .context("failed to build llm http client")?;
 
-        Ok(Self { http, cfg })
+        let cache = if cfg.enable_prompt_cache {
+            Some(PromptCache::new(&cfg.prompt_cache_dir)?)
+        } else {
+            None
+        };
+
+        Ok(Self { http, cfg, cache })
     }
 
     pub fn system_prompt(&self) -> &str {
@@ -130,7 +149,7 @@ impl OpenAiCompatClient {
         messages: &[Value],
         tools: &[ToolDefinition],
         audit_log_path_override: Option<&str>,
-    ) -> Result<Value> {
+    ) -> Result<ChatCompletionResult> {
         let openai_tools: Vec<Value> = tools
             .iter()
             .map(|t| {
@@ -155,6 +174,14 @@ impl OpenAiCompatClient {
         if !openai_tools.is_empty() {
             body["tools"] = json!(openai_tools);
             body["tool_choice"] = json!("auto");
+        }
+
+        let request_hash = request_hash_hex(&body);
+        if let Some(cache) = &self.cache {
+            if let Some(cached) = cache.lookup(&request_hash)? {
+                eprintln!("info: local prompt cache hit");
+                return Ok(cached);
+            }
         }
 
         let response = self
@@ -187,13 +214,35 @@ impl OpenAiCompatClient {
             }
         }
 
-        payload
+        let message = payload
             .get("choices")
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
             .and_then(|choice| choice.get("message"))
             .cloned()
-            .context("model response missing choices[0].message")
+            .context("model response missing choices[0].message")?;
+
+        let usage = payload
+            .get("usage")
+            .cloned()
+            .map(serde_json::from_value::<ModelUsage>)
+            .transpose()
+            .context("model response usage payload was invalid")?
+            .unwrap_or_default();
+
+        let result = ChatCompletionResult {
+            message: message.clone(),
+            usage: usage.clone(),
+            cached: false,
+        };
+
+        if let Some(cache) = &self.cache {
+            if let Err(err) = cache.store(&request_hash, &result) {
+                eprintln!("warn: failed to write prompt cache entry: {err}");
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -228,4 +277,34 @@ fn write_model_audit_log(path: &str, request: &Value, payload: &Value) -> Result
     let pretty = serde_json::to_string_pretty(&records).context("failed to encode audit log")?;
     write(path, pretty).with_context(|| format!("failed to write {path}"))?;
     Ok(())
+}
+
+fn request_hash_hex(body: &Value) -> String {
+    let canonical = canonicalize_json(body);
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let hash = hasher.finalize();
+    hash.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+fn canonicalize_json(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s)),
+        Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(canonicalize_json).collect();
+            format!("[{}]", items.join(","))
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .into_iter()
+                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap(), canonicalize_json(&map[k])))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+    }
 }

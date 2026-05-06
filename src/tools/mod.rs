@@ -138,7 +138,9 @@ impl GlobalToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.handlers.values().map(|h| h.definition()).collect()
+        let mut definitions: Vec<ToolDefinition> = self.handlers.values().map(|h| h.definition()).collect();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        definitions
     }
 
     pub fn execute(&self, name: &str, input_json: &str) -> Result<String> {
