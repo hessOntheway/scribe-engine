@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "my_claw",
     version,
-    about = "Restricted GitHub Wiki markdown publisher"
+    about = "Scribe Engine local web runtime and tool interface"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -24,33 +24,15 @@ pub enum Command {
         #[arg(long)]
         input: String,
     },
-    /// Publish a new markdown page to GitHub Wiki.
-    Publish {
-        /// Wiki file path in the wiki repository. Must be a relative .md path
-        #[arg(long)]
-        path: String,
-        /// Local markdown file to upload
-        #[arg(long)]
-        file: String,
-        /// Commit message
-        #[arg(long, default_value = "publish wiki page")]
-        message: String,
-    },
-    /// Update an existing markdown page on GitHub Wiki.
-    Update {
-        /// Wiki file path in the wiki repository. Must be a relative .md path
-        #[arg(long)]
-        path: String,
-        /// Local markdown file to upload
-        #[arg(long)]
-        file: String,
-        /// Commit message
-        #[arg(long, default_value = "update wiki page")]
-        message: String,
-    },
-    /// Ask the model to plan/execute with registered tools.
-    Ask {
-        /// Maximum model-tool turns.
+    /// Start a local web UI backed by the same ask runtime.
+    Serve {
+        /// Host to bind the local web server to.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to bind the local web server to.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        /// Maximum model-tool turns per user message.
         #[arg(long, default_value_t = 6)]
         max_steps: usize,
     },

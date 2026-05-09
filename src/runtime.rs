@@ -11,6 +11,24 @@ use crate::llm::usage::PromptCacheStats;
 use crate::tools::GlobalToolRegistry;
 static SUBAGENT_AUDIT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+pub type RuntimeEventSink = Arc<dyn Fn(RuntimeEvent) + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    AssistantMessage(Value),
+    ToolCall {
+        tool_call_id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        tool_call_id: String,
+        name: String,
+        arguments: String,
+        result: String,
+    },
+}
+
 pub struct AgentLoop {
     llm: Arc<OpenAiCompatClient>,
     max_steps: usize,
@@ -21,13 +39,20 @@ impl AgentLoop {
         Self { llm, max_steps }
     }
 
-    pub fn run_session_turn(
+    pub fn run_session_turn_with_events(
         &self,
         session: &mut ConversationSession,
         tool_registry: &GlobalToolRegistry,
+        event_sink: Option<RuntimeEventSink>,
     ) -> Result<String> {
         let (messages, prompt_cache_stats) = session.messages_and_prompt_cache_stats_mut();
-        self.run_message_loop(messages, tool_registry, None, Some(prompt_cache_stats))
+        self.run_message_loop(
+            messages,
+            tool_registry,
+            None,
+            Some(prompt_cache_stats),
+            event_sink,
+        )
     }
 
     pub fn run_subagent(
@@ -46,7 +71,7 @@ impl AgentLoop {
             json!({"role": "user", "content": user_prompt}),
         ];
 
-        self.run_message_loop(&mut messages, tool_registry, audit_path.as_deref(), None)
+        self.run_message_loop(&mut messages, tool_registry, audit_path.as_deref(), None, None)
     }
 
     fn run_message_loop(
@@ -55,6 +80,7 @@ impl AgentLoop {
         tool_registry: &GlobalToolRegistry,
         audit_log_path_override: Option<&str>,
         prompt_cache_stats: Option<&mut PromptCacheStats>,
+        event_sink: Option<RuntimeEventSink>,
     ) -> Result<String> {
         if self.max_steps == 0 {
             bail!("max_steps must be greater than 0");
@@ -103,6 +129,9 @@ impl AgentLoop {
             }
 
             messages.push(assistant.message.clone());
+            if let Some(sink) = &event_sink {
+                sink(RuntimeEvent::AssistantMessage(assistant.message.clone()));
+            }
 
             let tool_calls = assistant
                 .message
@@ -144,10 +173,27 @@ impl AgentLoop {
                     .and_then(|v| v.as_str())
                     .context("tool function arguments missing")?;
 
+                if let Some(sink) = &event_sink {
+                    sink(RuntimeEvent::ToolCall {
+                        tool_call_id: tool_id.to_string(),
+                        name: name.to_string(),
+                        arguments: arguments.to_string(),
+                    });
+                }
+
                 let result = match tool_registry.execute(name, arguments) {
                     Ok(output) => output,
                     Err(err) => format!("tool_error: {}", err),
                 };
+
+                if let Some(sink) = &event_sink {
+                    sink(RuntimeEvent::ToolResult {
+                        tool_call_id: tool_id.to_string(),
+                        name: name.to_string(),
+                        arguments: arguments.to_string(),
+                        result: result.clone(),
+                    });
+                }
 
                 messages.push(json!({
                     "role": "tool",
@@ -190,8 +236,12 @@ impl ConversationRuntime {
         }
     }
 
-    pub fn run_session_turn(&self, session: &mut ConversationSession) -> Result<String> {
+    pub fn run_session_turn_with_events(
+        &self,
+        session: &mut ConversationSession,
+        event_sink: Option<RuntimeEventSink>,
+    ) -> Result<String> {
         self.agent_loop
-            .run_session_turn(session, self.tool_registry.as_ref())
+            .run_session_turn_with_events(session, self.tool_registry.as_ref(), event_sink)
     }
 }

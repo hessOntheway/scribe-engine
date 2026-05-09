@@ -8,7 +8,6 @@ use serde_json::{json, Value};
 
 use crate::llm::usage::PromptCacheStats;
 
-const USER_PROMPT_PREFIX: &str = "USER_PROMPT:";
 const SESSION_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,18 +96,8 @@ impl ConversationSession {
         Ok(())
     }
 
-    pub fn extract_user_prompt(reply: &str) -> Option<String> {
-        for line in reply.lines() {
-            let trimmed = line.trim_start();
-            if let Some(rest) = trimmed.strip_prefix(USER_PROMPT_PREFIX) {
-                let prompt = rest.trim();
-                if prompt.is_empty() {
-                    return Some(String::new());
-                }
-                return Some(prompt.to_string());
-            }
-        }
-        None
+    pub fn snapshot(&self) -> &ConversationSessionSnapshot {
+        &self.snapshot
     }
 }
 

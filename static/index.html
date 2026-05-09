@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scribe Live Workspace</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand-panel">
+          <p class="eyebrow">Scribe Engine</p>
+          <h1>Live Agent</h1>
+          <p class="subtle">一个服务、一个前端页面、一个持续运行的多轮对话工作台。</p>
+        </div>
+
+        <section class="status-panel">
+          <div class="status-line">
+            <span class="meta-label">Transport</span>
+            <span id="connection-status" class="chip neutral">HTTP</span>
+          </div>
+          <div class="status-line">
+            <span class="meta-label">Runtime</span>
+            <span id="run-status" class="chip neutral">Idle</span>
+          </div>
+          <div class="status-line">
+            <span class="meta-label">Live Session</span>
+            <span id="session-meta" class="meta-value">Not initialized</span>
+          </div>
+          <div class="status-line">
+            <span class="meta-label">Turns</span>
+            <span id="turn-meta" class="meta-value">-</span>
+          </div>
+        </section>
+
+        <section class="status-panel">
+          <div class="status-line">
+            <span class="meta-label">Tool Steps</span>
+            <span id="tool-step-count" class="meta-value">0</span>
+          </div>
+          <div class="status-line block">
+            <span class="meta-label">Last Error</span>
+            <p id="error-meta" class="subtle">None</p>
+          </div>
+        </section>
+
+        <section class="status-panel tips-panel">
+          <p class="meta-label">Notes</p>
+          <p class="subtle">服务端会维护唯一的 live conversation，并保存完整的 UI 历史快照。</p>
+          <p class="subtle">每次发送后，页面会同步拿回这一轮新增的消息，而不是重建整段历史。</p>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="eyebrow">Single Live Conversation</p>
+            <h2 id="conversation-title">Live conversation</h2>
+          </div>
+          <div class="header-meta">
+            <span id="header-status" class="subtle">Waiting for runtime</span>
+            <span class="subtle shortcut-hint">Enter newline · Cmd/Ctrl+Enter send</span>
+          </div>
+        </header>
+
+        <section id="message-stream" class="message-stream" aria-live="polite"></section>
+
+        <footer class="composer">
+          <div class="composer-shell">
+            <label class="composer-label" for="prompt-input">Message the live agent</label>
+            <textarea
+              id="prompt-input"
+              rows="4"
+              placeholder="Ask about code architecture, flow analysis, Mermaid diagrams, or continue the current task..."
+            ></textarea>
+          </div>
+          <div class="composer-actions">
+            <p class="subtle">当前页面就是唯一聊天入口，服务端会保持 loop 和上下文。</p>
+            <button id="send-button" class="primary-button" type="button">Send</button>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <template id="message-template">
+      <article class="message-row">
+        <div class="message-avatar"></div>
+        <div class="message-stack">
+          <div class="message-meta">
+            <span class="role-badge"></span>
+            <span class="message-kind"></span>
+          </div>
+          <div class="message-body"></div>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
