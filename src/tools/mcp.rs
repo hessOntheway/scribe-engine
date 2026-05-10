@@ -460,8 +460,6 @@ fn normalize_name(raw: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-
-
 fn persist_graph_images(tool_name: &str, result: &mut Value) -> Result<Vec<String>> {
     let Some(content_items) = result.get("content").and_then(|v| v.as_array()) else {
         return Ok(Vec::new());

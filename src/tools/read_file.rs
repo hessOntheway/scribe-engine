@@ -100,7 +100,11 @@ fn run_read_file(input: &ReadFileInput) -> Result<ReadFileOutput> {
         });
     }
     if start_line > total_lines {
-        bail!("start_line {} is beyond file length {}", start_line, total_lines);
+        bail!(
+            "start_line {} is beyond file length {}",
+            start_line,
+            total_lines
+        );
     }
 
     let clamped_end_line = end_line.min(total_lines);
@@ -130,7 +134,10 @@ fn resolve_file_path(workspace_root: &Path, path: &str) -> Result<PathBuf> {
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
-        if candidate.components().any(|component| matches!(component, Component::ParentDir)) {
+        if candidate
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
             bail!("'..' path segments are not allowed");
         }
         workspace_root.join(candidate)
@@ -141,7 +148,10 @@ fn resolve_file_path(workspace_root: &Path, path: &str) -> Result<PathBuf> {
         .with_context(|| format!("failed to resolve path: {}", joined.display()))?;
 
     if !canonical.is_file() {
-        bail!("path does not point to a regular file: {}", canonical.display());
+        bail!(
+            "path does not point to a regular file: {}",
+            canonical.display()
+        );
     }
 
     Ok(canonical)
@@ -160,7 +170,7 @@ mod tests {
         let ts_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
-            .unwrap_or(0); 
+            .unwrap_or(0);
         let seq = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("scribe-read-file-test-{ts_nanos}-{seq}"));
         create_dir_all(&dir).expect("create temp workspace");
@@ -227,6 +237,9 @@ mod tests {
         let err = run_read_file(&input).expect_err("path escape should fail");
         std::env::set_current_dir(previous_dir).expect("restore current dir");
 
-        assert!(err.to_string().contains("'..' path segments are not allowed"));
+        assert!(
+            err.to_string()
+                .contains("'..' path segments are not allowed")
+        );
     }
 }

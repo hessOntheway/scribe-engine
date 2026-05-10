@@ -172,7 +172,11 @@ fn generate_compact_summary(
         )
     }));
 
-    let response = llm.create_chat_completion_with_audit_path(&messages, tool_definitions, audit_log_path_override)?;
+    let response = llm.create_chat_completion_with_audit_path(
+        &messages,
+        tool_definitions,
+        audit_log_path_override,
+    )?;
 
     if let Some(stats) = prompt_cache_stats {
         stats.record_usage(&response.usage);

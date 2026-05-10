@@ -85,7 +85,10 @@ impl TeamManager {
             let config_text =
                 serde_json::to_string_pretty(&state).context("failed to encode team config")?;
             fs::write(&config_path, config_text).with_context(|| {
-                format!("failed to initialize team config: {}", config_path.display())
+                format!(
+                    "failed to initialize team config: {}",
+                    config_path.display()
+                )
             })?;
         }
 
@@ -112,14 +115,20 @@ impl TeamManager {
         for member in &state.members {
             let snapshot = task_registry
                 .map(|registry| task_snapshot_value(registry, member.task_id.as_deref()))
-                .unwrap_or_else(|| json!({"available": false, "reason": "task registry unavailable"}));
+                .unwrap_or_else(
+                    || json!({"available": false, "reason": "task registry unavailable"}),
+                );
 
             if snapshot
                 .get("available")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                match snapshot.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+                match snapshot
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                {
                     "running" => running += 1,
                     "completed" => completed += 1,
                     "failed" => failed += 1,
@@ -130,7 +139,10 @@ impl TeamManager {
             }
 
             if let Some(task_id) = member.task_id.as_deref() {
-                let status = snapshot.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let status = snapshot
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let (todo_status, active_hint) = match status {
                     "running" if !active_projection_assigned => {
                         active_projection_assigned = true;
@@ -256,10 +268,11 @@ impl TeamManager {
                     shutdown,
                 ) {
                     let _ = manager.update_member_status(&worker_name, MemberStatus::Idle);
-                    let _ = manager.send("system", "lead", &format!(
-                        "teammate '{}' worker loop failed: {}",
-                        worker_name, err
-                    ));
+                    let _ = manager.send(
+                        "system",
+                        "lead",
+                        &format!("teammate '{}' worker loop failed: {}", worker_name, err),
+                    );
                 }
                 if let Ok(mut workers) = manager.workers.lock() {
                     workers.remove(&worker_name);
@@ -411,8 +424,9 @@ impl TeamManager {
                     if let Some(task_id) = task_id {
                         let _ = task_registry.fail_task(task_id, &err.to_string());
                     }
-                    return Err(err)
-                        .with_context(|| format!("initial assignment failed for teammate '{}'", name));
+                    return Err(err).with_context(|| {
+                        format!("initial assignment failed for teammate '{}'", name)
+                    });
                 }
             };
 
@@ -514,7 +528,9 @@ impl TeamManager {
                     .members
                     .iter()
                     .find(|member| &member.name == name)
-                    .map(|member| matches!(member.status, MemberStatus::Idle | MemberStatus::Shutdown))
+                    .map(|member| {
+                        matches!(member.status, MemberStatus::Idle | MemberStatus::Shutdown)
+                    })
                     .unwrap_or(false)
             });
 
@@ -588,8 +604,12 @@ impl TeamManager {
         let text = fs::read_to_string(&self.config_path).with_context(|| {
             format!("failed to read team config: {}", self.config_path.display())
         })?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("failed to parse team config: {}", self.config_path.display()))
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "failed to parse team config: {}",
+                self.config_path.display()
+            )
+        })
     }
 
     fn save_state(&self, state: &TeamState) -> Result<()> {
@@ -599,8 +619,12 @@ impl TeamManager {
             .map_err(|_| anyhow::anyhow!("team io mutex poisoned"))?;
         let text =
             serde_json::to_string_pretty(state).context("failed to encode team config state")?;
-        fs::write(&self.config_path, text)
-            .with_context(|| format!("failed to write team config: {}", self.config_path.display()))
+        fs::write(&self.config_path, text).with_context(|| {
+            format!(
+                "failed to write team config: {}",
+                self.config_path.display()
+            )
+        })
     }
 }
 
@@ -729,8 +753,8 @@ fn spawn_teammate_handler(
     };
 
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
-        let input: SpawnInput = serde_json::from_str(input_json)
-            .context("invalid input JSON for spawn_teammate")?;
+        let input: SpawnInput =
+            serde_json::from_str(input_json).context("invalid input JSON for spawn_teammate")?;
         manager.spawn_teammate(
             &input.name,
             &input.role,
@@ -807,8 +831,8 @@ fn team_huddle_handler(
     };
 
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
-        let input: TeamHuddleInput = serde_json::from_str(input_json)
-            .context("invalid input JSON for team_huddle")?;
+        let input: TeamHuddleInput =
+            serde_json::from_str(input_json).context("invalid input JSON for team_huddle")?;
         if input.members.is_empty() {
             bail!("team_huddle requires at least one member");
         }
@@ -828,7 +852,8 @@ fn team_huddle_handler(
 fn broadcast_teammate_message_handler(manager: Arc<TeamManager>) -> ToolHandler {
     let definition = ToolDefinition {
         name: "broadcast_teammate_message".to_string(),
-        description: "Broadcast a message to all teammates currently in the team roster.".to_string(),
+        description: "Broadcast a message to all teammates currently in the team roster."
+            .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -883,8 +908,8 @@ fn team_status_handler(manager: Arc<TeamManager>, task_registry: Arc<TaskRegistr
     };
 
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
-        let empty: serde_json::Value = serde_json::from_str(input_json)
-            .context("invalid input JSON for team_status")?;
+        let empty: serde_json::Value =
+            serde_json::from_str(input_json).context("invalid input JSON for team_status")?;
         if !empty.is_object() {
             bail!("team_status expects an object payload");
         }
@@ -909,8 +934,8 @@ fn shutdown_teammate_handler(manager: Arc<TeamManager>) -> ToolHandler {
     };
 
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
-        let input: ShutdownInput = serde_json::from_str(input_json)
-            .context("invalid input JSON for shutdown_teammate")?;
+        let input: ShutdownInput =
+            serde_json::from_str(input_json).context("invalid input JSON for shutdown_teammate")?;
         manager.shutdown_teammate(&input.name)
     });
 
@@ -978,14 +1003,18 @@ fn render_task_context(task_registry: &TaskRegistry, task_id: Option<&str>) -> S
     };
 
     let Some(task) = task_registry.get(id) else {
-        return format!("Task binding requested ('{}'), but task is not currently registered.", id);
+        return format!(
+            "Task binding requested ('{}'), but task is not currently registered.",
+            id
+        );
     };
 
     format!(
         "Task context: id='{}', status='{:?}', assigned_teammate='{}', prompt='{}'",
         task.id,
         task.status,
-        task.assigned_teammate.unwrap_or_else(|| "<none>".to_string()),
+        task.assigned_teammate
+            .unwrap_or_else(|| "<none>".to_string()),
         task.prompt
     )
 }

@@ -87,7 +87,10 @@ pub struct ChatCompletionResult {
 impl OpenAiCompatClient {
     pub fn new(cfg: LlmConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("my-claw-blog-agent/0.1"));
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static("my-claw-blog-agent/0.1"),
+        );
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -302,7 +305,13 @@ fn canonicalize_json(value: &Value) -> String {
             keys.sort();
             let parts: Vec<String> = keys
                 .into_iter()
-                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap(), canonicalize_json(&map[k])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap(),
+                        canonicalize_json(&map[k])
+                    )
+                })
                 .collect();
             format!("{{{}}}", parts.join(","))
         }

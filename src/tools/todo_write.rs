@@ -172,8 +172,7 @@ fn save_todos_to_path(path: &PathBuf, todos: &[TodoItem]) -> Result<()> {
         todos: todos.to_vec(),
     };
     let text = serde_json::to_string_pretty(&payload).context("failed to encode todo store")?;
-    fs::write(path, text)
-        .with_context(|| format!("failed to write todo store: {}", path.display()))
+    fs::write(path, text).with_context(|| format!("failed to write todo store: {}", path.display()))
 }
 
 fn clear_store_file(path: &PathBuf) -> Result<()> {

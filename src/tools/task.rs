@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -323,8 +323,8 @@ fn task_get_handler(task_registry: Arc<TaskRegistry>) -> ToolHandler {
     };
 
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
-        let input: TaskGetInput = serde_json::from_str(input_json)
-            .context("invalid input JSON for task_get")?;
+        let input: TaskGetInput =
+            serde_json::from_str(input_json).context("invalid input JSON for task_get")?;
         let task_id = input.task_id.trim();
         if task_id.is_empty() {
             bail!("task_id cannot be empty");
@@ -370,8 +370,8 @@ fn task_list_handler(task_registry: Arc<TaskRegistry>) -> ToolHandler {
     };
 
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
-        let input: TaskListInput = serde_json::from_str(input_json)
-            .context("invalid input JSON for task_list")?;
+        let input: TaskListInput =
+            serde_json::from_str(input_json).context("invalid input JSON for task_list")?;
 
         if let Some(limit) = input.limit {
             if limit == 0 || limit > 200 {
@@ -425,8 +425,8 @@ fn task_output_handler(task_registry: Arc<TaskRegistry>) -> ToolHandler {
     };
 
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
-        let input: TaskOutputInput = serde_json::from_str(input_json)
-            .context("invalid input JSON for task_output")?;
+        let input: TaskOutputInput =
+            serde_json::from_str(input_json).context("invalid input JSON for task_output")?;
         let task_id = input.task_id.trim();
         if task_id.is_empty() {
             bail!("task_id cannot be empty");

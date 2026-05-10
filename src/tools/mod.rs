@@ -10,19 +10,19 @@ mod glob_search;
 mod grep_search;
 mod mcp;
 mod read_file;
-mod web_fetch;
-mod write_file;
 pub mod team;
 mod todo_write;
+mod web_fetch;
+mod write_file;
 
 pub use glob_search::glob_search_handler;
 pub use grep_search::grep_search_handler;
 pub use mcp::mcp_plugin_tools_from_config;
 pub use read_file::read_file_handler;
 pub use task::TaskRegistry;
-pub use web_fetch::web_fetch_handler;
 pub use team::{TeamManager, team_tool_handlers};
 pub use todo_write::todo_write_handler;
+pub use web_fetch::web_fetch_handler;
 pub use write_file::write_file_handler;
 
 use self::github_wiki::github_wiki_publish_handler;
@@ -73,10 +73,7 @@ impl GlobalToolRegistry {
         let mut handlers = HashMap::new();
 
         let github_wiki_publish = github_wiki_publish_handler();
-        handlers.insert(
-            github_wiki_publish.name().to_string(),
-            github_wiki_publish,
-        );
+        handlers.insert(github_wiki_publish.name().to_string(), github_wiki_publish);
 
         let glob_search = glob_search_handler();
         handlers.insert(glob_search.name().to_string(), glob_search);
@@ -138,7 +135,8 @@ impl GlobalToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions: Vec<ToolDefinition> = self.handlers.values().map(|h| h.definition()).collect();
+        let mut definitions: Vec<ToolDefinition> =
+            self.handlers.values().map(|h| h.definition()).collect();
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         definitions
     }

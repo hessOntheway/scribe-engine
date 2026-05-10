@@ -82,8 +82,8 @@ pub fn web_fetch_handler() -> ToolHandler {
 }
 
 fn run_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput> {
-    let parsed_url = reqwest::Url::parse(&input.url)
-        .with_context(|| format!("invalid url: {}", input.url))?;
+    let parsed_url =
+        reqwest::Url::parse(&input.url).with_context(|| format!("invalid url: {}", input.url))?;
 
     match parsed_url.scheme() {
         "http" | "https" => {}
@@ -115,7 +115,9 @@ fn run_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput> {
     let response_headers = response
         .headers()
         .iter()
-        .filter_map(|(name, value)| Some((name.as_str().to_string(), value.to_str().ok()?.to_string())))
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
         .collect::<Vec<_>>();
 
     let mut body = Vec::new();
@@ -187,7 +189,8 @@ fn extract_title(text: &str, content_type: Option<&str>) -> Option<String> {
 }
 
 fn html_to_text(html: &str) -> String {
-    let script_re = Regex::new(r"(?is)<(script|style|noscript)[^>]*>.*?</(script|style|noscript)>").expect("valid regex");
+    let script_re = Regex::new(r"(?is)<(script|style|noscript)[^>]*>.*?</(script|style|noscript)>")
+        .expect("valid regex");
     let tag_re = Regex::new(r"(?is)<[^>]+>").expect("valid regex");
 
     let without_blocks = script_re.replace_all(html, " ");

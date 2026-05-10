@@ -118,16 +118,22 @@ impl PromptCacheStats {
             .unwrap_or_else(|| "n/a".to_string());
 
         let local_summary = if self.total_local_cache_hits > 0 {
-            format!(" local_cache_hits={} last_local_cache_hit={}", self.total_local_cache_hits, self.last_local_cache_hit)
+            format!(
+                " local_cache_hits={} last_local_cache_hit={}",
+                self.total_local_cache_hits, self.last_local_cache_hit
+            )
         } else {
             String::new()
         };
 
-        if self.last_usage.has_cache_telemetry() || total_hit > 0 || total_miss > 0 || self.total_local_cache_hits > 0 {
+        if self.last_usage.has_cache_telemetry()
+            || total_hit > 0
+            || total_miss > 0
+            || self.total_local_cache_hits > 0
+        {
             format!(
                 "info: prompt cache stats: call_hit_tokens={last_hit} call_miss_tokens={last_miss} call_hit_rate={last_rate} total_hit_tokens={total_hit} total_miss_tokens={total_miss} total_hit_rate={total_rate} total_model_calls={}{}{local_summary}",
-                self.total_model_calls,
-                local_summary
+                self.total_model_calls, local_summary
             )
         } else {
             format!(

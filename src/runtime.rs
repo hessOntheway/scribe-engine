@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact::{apply_micro_compact, auto_compact_if_needed};
@@ -71,7 +71,13 @@ impl AgentLoop {
             json!({"role": "user", "content": user_prompt}),
         ];
 
-        self.run_message_loop(&mut messages, tool_registry, audit_path.as_deref(), None, None)
+        self.run_message_loop(
+            &mut messages,
+            tool_registry,
+            audit_path.as_deref(),
+            None,
+            None,
+        )
     }
 
     fn run_message_loop(
@@ -111,13 +117,11 @@ impl AgentLoop {
                 );
             }
 
-            let assistant = self
-                .llm
-                .create_chat_completion_with_audit_path(
-                    &messages,
-                    &tool_definitions,
-                    audit_log_path_override,
-                )?;
+            let assistant = self.llm.create_chat_completion_with_audit_path(
+                &messages,
+                &tool_definitions,
+                audit_log_path_override,
+            )?;
 
             if let Some(stats) = prompt_cache_stats.as_mut() {
                 if assistant.cached {
@@ -241,7 +245,10 @@ impl ConversationRuntime {
         session: &mut ConversationSession,
         event_sink: Option<RuntimeEventSink>,
     ) -> Result<String> {
-        self.agent_loop
-            .run_session_turn_with_events(session, self.tool_registry.as_ref(), event_sink)
+        self.agent_loop.run_session_turn_with_events(
+            session,
+            self.tool_registry.as_ref(),
+            event_sink,
+        )
     }
 }

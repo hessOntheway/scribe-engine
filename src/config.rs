@@ -45,11 +45,7 @@ impl GithubConfig {
 fn current_repo_name() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let name = cwd.file_name()?.to_string_lossy().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 #[derive(Debug, Clone)]

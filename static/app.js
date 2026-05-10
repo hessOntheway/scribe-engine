@@ -18,6 +18,7 @@ mermaid.initialize({
 
 const state = {
   snapshot: null,
+  sessions: [],
   messages: [],
   status: "idle",
   lastError: "",
@@ -29,6 +30,7 @@ const nodes = {
   runStatus: document.querySelector("#run-status"),
   headerStatus: document.querySelector("#header-status"),
   sessionMeta: document.querySelector("#session-meta"),
+  sessionList: document.querySelector("#session-list"),
   turnMeta: document.querySelector("#turn-meta"),
   toolStepCount: document.querySelector("#tool-step-count"),
   errorMeta: document.querySelector("#error-meta"),
@@ -36,6 +38,7 @@ const nodes = {
   messageStream: document.querySelector("#message-stream"),
   promptInput: document.querySelector("#prompt-input"),
   sendButton: document.querySelector("#send-button"),
+  newSessionButton: document.querySelector("#new-session-button"),
   messageTemplate: document.querySelector("#message-template"),
 };
 
@@ -43,12 +46,13 @@ bootstrap();
 
 async function bootstrap() {
   bindEvents();
-  await loadLiveSnapshot();
+  await Promise.all([loadSessions(), loadLiveSnapshot()]);
   render();
 }
 
 function bindEvents() {
   nodes.sendButton.addEventListener("click", onSend);
+  nodes.newSessionButton.addEventListener("click", onNewSession);
   nodes.promptInput.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
@@ -61,6 +65,15 @@ async function loadLiveSnapshot() {
   try {
     const snapshot = await requestJson("/api/live");
     applySnapshot(snapshot);
+  } catch (error) {
+    state.lastError = error instanceof Error ? error.message : String(error);
+    state.status = "error";
+  }
+}
+
+async function loadSessions() {
+  try {
+    state.sessions = await requestJson("/api/sessions");
   } catch (error) {
     state.lastError = error instanceof Error ? error.message : String(error);
     state.status = "error";
@@ -95,11 +108,55 @@ async function onSend() {
     };
     state.status = response.status || "waiting_for_input";
     state.lastError = response.last_error || "";
+    await loadSessions();
   } catch (error) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
   } finally {
     state.isRunning = false;
+    render();
+  }
+}
+
+async function onNewSession() {
+  if (state.isRunning) {
+    return;
+  }
+
+  state.lastError = "";
+  render();
+
+  try {
+    const snapshot = await requestJson("/api/live/session/new", { method: "POST" });
+    applySnapshot(snapshot);
+    await loadSessions();
+  } catch (error) {
+    state.status = "error";
+    state.lastError = error instanceof Error ? error.message : String(error);
+  } finally {
+    render();
+  }
+}
+
+async function onSelectSession(sessionId) {
+  if (state.isRunning || sessionId === state.snapshot?.session_id) {
+    return;
+  }
+
+  state.lastError = "";
+  render();
+
+  try {
+    const snapshot = await requestJson("/api/live/session", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    applySnapshot(snapshot);
+    await loadSessions();
+  } catch (error) {
+    state.status = "error";
+    state.lastError = error instanceof Error ? error.message : String(error);
+  } finally {
     render();
   }
 }
@@ -113,6 +170,7 @@ function applySnapshot(snapshot) {
 
 function render() {
   renderHeaderState();
+  renderSessions();
   renderMessages();
 }
 
@@ -131,6 +189,50 @@ function renderHeaderState() {
 
   nodes.sendButton.disabled = state.isRunning;
   nodes.promptInput.disabled = state.isRunning;
+  nodes.newSessionButton.disabled = state.isRunning;
+}
+
+function renderSessions() {
+  nodes.sessionList.innerHTML = "";
+
+  const draftActive = !state.snapshot?.session_id && state.messages.length === 0;
+  const draftCard = document.createElement("button");
+  draftCard.type = "button";
+  draftCard.className = `session-card ${draftActive ? "active" : ""}`;
+  draftCard.disabled = state.isRunning;
+  draftCard.addEventListener("click", onNewSession);
+  draftCard.innerHTML = `
+    <div class="session-card-head">
+      <strong>New session</strong>
+      <span class="session-time">Draft</span>
+    </div>
+    <p class="subtle">Start fresh without losing the older conversations.</p>
+  `;
+  nodes.sessionList.append(draftCard);
+
+  if (state.sessions.length === 0) {
+    return;
+  }
+
+  for (const session of state.sessions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `session-card ${session.is_active ? "active" : ""}`;
+    button.disabled = state.isRunning;
+    button.addEventListener("click", () => onSelectSession(session.session_id));
+
+    const turnCount = session.prompt_count || 0;
+    button.innerHTML = `
+      <div class="session-card-head">
+        <strong>${escapeHtml(session.title || "Untitled session")}</strong>
+        <span class="session-time">${formatTimestamp(session.updated_at_unix_ms)}</span>
+      </div>
+      <p class="subtle">${escapeHtml(session.session_id)}</p>
+      <p class="subtle">${turnCount} turn${turnCount === 1 ? "" : "s"} · ${session.message_count} messages</p>
+    `;
+
+    nodes.sessionList.append(button);
+  }
 }
 
 function renderMessages() {
@@ -454,6 +556,32 @@ function createEmptyState(title, text) {
   div.className = "empty-state";
   div.innerHTML = `<h3>${title}</h3><p class="subtle">${text}</p>`;
   return div;
+}
+
+function formatTimestamp(timestamp) {
+  if (!timestamp) {
+    return "-";
+  }
+
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(Number(timestamp)));
+  } catch {
+    return String(timestamp);
+  }
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 async function requestJson(url, options = {}) {

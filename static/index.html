@@ -3,8 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Scribe Live Workspace</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260510b" />
   </head>
   <body>
     <div class="shell">
@@ -45,17 +48,25 @@
           </div>
         </section>
 
+        <section class="status-panel sessions-panel">
+          <div class="status-line">
+            <span class="meta-label">Sessions</span>
+            <button id="new-session-button" class="inline-button" type="button">New</button>
+          </div>
+          <div id="session-list" class="session-list" aria-label="Conversation sessions"></div>
+        </section>
+
         <section class="status-panel tips-panel">
           <p class="meta-label">Notes</p>
-          <p class="subtle">服务端会维护唯一的 live conversation，并保存完整的 UI 历史快照。</p>
-          <p class="subtle">每次发送后，页面会同步拿回这一轮新增的消息，而不是重建整段历史。</p>
+          <p class="subtle">服务端会保存会话文件与当前 UI 快照，页面刷新后会回到你上次打开的那个会话。</p>
+          <p class="subtle">切换会话会载入对应历史；发送新消息时，只会追加当前这一轮的新内容。</p>
         </section>
       </aside>
 
       <main class="workspace">
         <header class="workspace-header">
           <div>
-            <p class="eyebrow">Single Live Conversation</p>
+            <p class="eyebrow">Multi Session Workspace</p>
             <h2 id="conversation-title">Live conversation</h2>
           </div>
           <div class="header-meta">
@@ -72,11 +83,11 @@
             <textarea
               id="prompt-input"
               rows="4"
-              placeholder="Ask about code architecture, flow analysis, Mermaid diagrams, or continue the current task..."
+              placeholder="Pick a session to continue, or start a new one here..."
             ></textarea>
           </div>
           <div class="composer-actions">
-            <p class="subtle">当前页面就是唯一聊天入口，服务端会保持 loop 和上下文。</p>
+            <p class="subtle">当前输入会发到右上角正在显示的那个会话。</p>
             <button id="send-button" class="primary-button" type="button">Send</button>
           </div>
         </footer>
@@ -96,6 +107,6 @@
       </article>
     </template>
 
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./app.js?v=20260510b"></script>
   </body>
 </html>

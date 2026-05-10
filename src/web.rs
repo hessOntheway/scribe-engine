@@ -41,6 +41,11 @@ struct PromptBody {
     prompt: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SelectSessionBody {
+    session_id: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum LiveStatus {
     Idle,
@@ -81,6 +86,17 @@ struct LiveSubmitResponse {
     last_error: Option<String>,
     new_messages: Vec<UiMessage>,
     total_message_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionListItem {
+    session_id: String,
+    title: String,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+    prompt_count: usize,
+    message_count: usize,
+    is_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,45 +150,46 @@ struct LiveConversationManager {
 impl LiveConversationManager {
     fn bootstrap(ask_app: AskApp) -> Result<Self> {
         let snapshot_path = ask_app.live_ui_snapshot_path();
-        let session = ask_app.load_latest_session()?;
         let persisted_snapshot = load_persisted_snapshot(&snapshot_path)?;
+        let session = match persisted_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.session_id.as_deref())
+        {
+            Some(session_id) => ask_app.load_session(session_id).ok(),
+            None => None,
+        }
+        .or(ask_app.load_latest_session()?);
 
-        let (title, session_id, ui_messages, status, last_error) = match session.as_ref() {
-            Some(session) => {
-                let snapshot = session.snapshot().clone();
-                match persisted_snapshot {
-                    Some(persisted) if persisted.session_id.as_deref() == Some(snapshot.session_id.as_str()) => (
-                        persisted.title,
-                        persisted.session_id,
-                        persisted.messages,
+        let (title, session_id, ui_messages, status, last_error) =
+            match (session.as_ref(), persisted_snapshot.as_ref()) {
+                (Some(session), Some(persisted))
+                    if persisted.session_id.as_deref()
+                        == Some(session.snapshot().session_id.as_str()) =>
+                {
+                    (
+                        persisted.title.clone(),
+                        persisted.session_id.clone(),
+                        persisted.messages.clone(),
                         status_from_str(&persisted.status),
-                        persisted.last_error,
-                    ),
-                    _ => {
-                        let ui_messages = flatten_messages(
-                            &snapshot.session_id,
-                            &snapshot.messages,
-                            0,
-                            snapshot.updated_at_unix_ms,
-                        );
-                        (
-                            summary_title(&snapshot),
-                            Some(snapshot.session_id.clone()),
-                            ui_messages,
-                            LiveStatus::WaitingForInput,
-                            None,
-                        )
-                    }
+                        persisted.last_error.clone(),
+                    )
                 }
-            }
-            None => (
-                "Live conversation".to_string(),
-                None,
-                Vec::new(),
-                LiveStatus::Idle,
-                None,
-            ),
-        };
+                (Some(session), _) => session_state_from_snapshot(session.snapshot()),
+                (None, Some(persisted)) if persisted.session_id.is_none() => (
+                    persisted.title.clone(),
+                    None,
+                    persisted.messages.clone(),
+                    status_from_str(&persisted.status),
+                    persisted.last_error.clone(),
+                ),
+                (None, _) => (
+                    "Live conversation".to_string(),
+                    None,
+                    Vec::new(),
+                    LiveStatus::Idle,
+                    None,
+                ),
+            };
 
         let manager = Self {
             ask_app,
@@ -205,7 +222,10 @@ impl LiveConversationManager {
         save_persisted_snapshot(&self.snapshot_path, &snapshot)
     }
 
-    async fn submit_user_message(self: &Arc<Self>, prompt: String) -> Result<LiveSubmitResponse, AppError> {
+    async fn submit_user_message(
+        self: &Arc<Self>,
+        prompt: String,
+    ) -> Result<LiveSubmitResponse, AppError> {
         let turn_id = TURN_COUNTER.fetch_add(1, Ordering::Relaxed);
         let manager = Arc::clone(self);
         task::spawn_blocking(move || manager.run_turn_blocking(prompt, turn_id))
@@ -213,17 +233,123 @@ impl LiveConversationManager {
             .map_err(|err| AppError::internal(anyhow!(err.to_string())))?
     }
 
-    fn run_turn_blocking(self: Arc<Self>, prompt: String, turn_id: u64) -> Result<LiveSubmitResponse, AppError> {
+    fn list_sessions(&self) -> Result<Vec<SessionListItem>, AppError> {
+        let active_session_id = {
+            let inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+            inner.session_id.clone()
+        };
+
+        let sessions = self
+            .ask_app
+            .list_session_snapshots()
+            .map_err(AppError::internal)?
+            .into_iter()
+            .map(|snapshot| SessionListItem {
+                is_active: active_session_id.as_deref() == Some(snapshot.session_id.as_str()),
+                title: summary_title(&snapshot),
+                prompt_count: snapshot.prompt_history.len(),
+                message_count: snapshot.messages.len(),
+                created_at_unix_ms: snapshot.created_at_unix_ms,
+                updated_at_unix_ms: snapshot.updated_at_unix_ms,
+                session_id: snapshot.session_id,
+            })
+            .collect();
+
+        Ok(sessions)
+    }
+
+    fn select_session(&self, session_id: String) -> Result<LiveSnapshot, AppError> {
+        let session = self
+            .ask_app
+            .load_session(&session_id)
+            .map_err(AppError::internal)?;
+        let snapshot = session.snapshot().clone();
+        let (title, current_session_id, ui_messages, status, last_error) =
+            session_state_from_snapshot(&snapshot);
+
+        let persisted = {
+            let mut inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+
+            if inner.status.is_busy() {
+                return Err(AppError::conflict(
+                    "agent is still working on the current turn",
+                ));
+            }
+
+            inner.session = Some(session);
+            inner.title = title;
+            inner.session_id = current_session_id;
+            inner.next_message_index = ui_messages.len();
+            inner.ui_messages = ui_messages;
+            inner.status = status;
+            inner.last_error = last_error;
+            self.snapshot_from_inner(&inner)
+        };
+
+        save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+        Ok(persisted)
+    }
+
+    fn reset_to_new_session(&self) -> Result<LiveSnapshot, AppError> {
+        {
+            let inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+
+            if inner.status.is_busy() {
+                return Err(AppError::conflict(
+                    "agent is still working on the current turn",
+                ));
+            }
+        }
+
+        let session = self
+            .ask_app
+            .new_empty_session()
+            .map_err(AppError::internal)?;
+        let snapshot = session.snapshot().clone();
+        let (title, current_session_id, ui_messages, status, last_error) =
+            session_state_from_snapshot(&snapshot);
+
+        let persisted = {
+            let mut inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+
+            inner.session = Some(session);
+            inner.title = title;
+            inner.session_id = current_session_id;
+            inner.next_message_index = ui_messages.len();
+            inner.ui_messages = ui_messages;
+            inner.status = status;
+            inner.last_error = last_error;
+            self.snapshot_from_inner(&inner)
+        };
+
+        save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+        Ok(persisted)
+    }
+
+    fn run_turn_blocking(
+        self: Arc<Self>,
+        prompt: String,
+        turn_id: u64,
+    ) -> Result<LiveSubmitResponse, AppError> {
         let mut new_messages = Vec::new();
 
         let (mut session, session_id) = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| AppError::internal(anyhow!("failed to lock live conversation state")))?;
+            let mut inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
 
             if inner.status.is_busy() {
-                return Err(AppError::conflict("agent is still working on the current turn"));
+                return Err(AppError::conflict(
+                    "agent is still working on the current turn",
+                ));
             }
 
             inner.status = LiveStatus::Thinking;
@@ -235,7 +361,10 @@ impl LiveConversationManager {
                     session.save().map_err(AppError::internal)?;
                     session
                 }
-                None => self.ask_app.new_session(prompt.clone()).map_err(AppError::internal)?,
+                None => self
+                    .ask_app
+                    .new_session(prompt.clone())
+                    .map_err(AppError::internal)?,
             };
 
             let snapshot = session.snapshot().clone();
@@ -286,10 +415,24 @@ impl LiveConversationManager {
         if let Err(error) = runtime_result {
             let _ = session.save();
             let error_text = error.to_string();
-            return self.finish_turn(session, session_id, turn_id, new_messages, collected_messages, Some(error_text));
+            return self.finish_turn(
+                session,
+                session_id,
+                turn_id,
+                new_messages,
+                collected_messages,
+                Some(error_text),
+            );
         }
 
-        self.finish_turn(session, session_id, turn_id, new_messages, collected_messages, None)
+        self.finish_turn(
+            session,
+            session_id,
+            turn_id,
+            new_messages,
+            collected_messages,
+            None,
+        )
     }
 
     fn finish_turn(
@@ -367,10 +510,14 @@ pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
     let static_dir = PathBuf::from("static");
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/sessions", get(list_sessions))
         .route("/api/live", get(get_live))
+        .route("/api/live/session", post(select_live_session))
+        .route("/api/live/session/new", post(post_new_live_session))
         .route("/api/live/messages", post(post_live_message))
         .fallback_service(
-            ServeDir::new(&static_dir).not_found_service(ServeFile::new(static_dir.join("index.html"))),
+            ServeDir::new(&static_dir)
+                .not_found_service(ServeFile::new(static_dir.join("index.html"))),
         )
         .with_state(state);
 
@@ -393,6 +540,30 @@ async fn health() -> Json<HealthResponse> {
 
 async fn get_live(State(state): State<WebState>) -> Result<Json<LiveSnapshot>, AppError> {
     Ok(Json(state.live.snapshot().map_err(AppError::internal)?))
+}
+
+async fn list_sessions(
+    State(state): State<WebState>,
+) -> Result<Json<Vec<SessionListItem>>, AppError> {
+    Ok(Json(state.live.list_sessions()?))
+}
+
+async fn select_live_session(
+    State(state): State<WebState>,
+    Json(body): Json<SelectSessionBody>,
+) -> Result<Json<LiveSnapshot>, AppError> {
+    let session_id = body.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err(AppError::bad_request("session_id must not be empty"));
+    }
+
+    Ok(Json(state.live.select_session(session_id)?))
+}
+
+async fn post_new_live_session(
+    State(state): State<WebState>,
+) -> Result<Json<LiveSnapshot>, AppError> {
+    Ok(Json(state.live.reset_to_new_session()?))
 }
 
 async fn post_live_message(
@@ -422,7 +593,8 @@ fn save_persisted_snapshot(path: &Path, snapshot: &LiveSnapshot) -> Result<()> {
             .with_context(|| format!("failed to create live snapshot dir: {}", parent.display()))?;
     }
 
-    let content = serde_json::to_vec_pretty(snapshot).context("failed to serialize live snapshot")?;
+    let content =
+        serde_json::to_vec_pretty(snapshot).context("failed to serialize live snapshot")?;
     std::fs::write(path, content)
         .with_context(|| format!("failed to write live snapshot: {}", path.display()))
 }
@@ -497,6 +669,9 @@ fn flatten_messages(
             .and_then(Value::as_str)
             .unwrap_or("assistant")
             .to_string();
+        if role == "system" {
+            continue;
+        }
         let content = message
             .get("content")
             .and_then(Value::as_str)
@@ -731,6 +906,31 @@ fn summary_title(snapshot: &ConversationSessionSnapshot) -> String {
         .collect()
 }
 
+fn session_state_from_snapshot(
+    snapshot: &ConversationSessionSnapshot,
+) -> (
+    String,
+    Option<String>,
+    Vec<UiMessage>,
+    LiveStatus,
+    Option<String>,
+) {
+    let ui_messages = flatten_messages(
+        &snapshot.session_id,
+        &snapshot.messages,
+        0,
+        snapshot.updated_at_unix_ms,
+    );
+
+    (
+        summary_title(snapshot),
+        Some(snapshot.session_id.clone()),
+        ui_messages,
+        LiveStatus::WaitingForInput,
+        None,
+    )
+}
+
 fn status_from_str(status: &str) -> LiveStatus {
     match status {
         "thinking" => LiveStatus::Thinking,
@@ -786,6 +986,12 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.status, Json(ApiError { error: self.message })).into_response()
+        (
+            self.status,
+            Json(ApiError {
+                error: self.message,
+            }),
+        )
+            .into_response()
     }
 }

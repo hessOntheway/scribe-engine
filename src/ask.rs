@@ -8,9 +8,7 @@ use crate::llm::openai::OpenAiCompatClient;
 use crate::llm::session::{ConversationSession, ConversationSessionSnapshot};
 use crate::runtime::{AgentLoop, ConversationRuntime, RuntimeEventSink};
 use crate::tools::task::{task_handler, task_query_handlers};
-use crate::tools::{
-    GlobalToolRegistry, TaskRegistry, TeamManager, team_tool_handlers,
-};
+use crate::tools::{GlobalToolRegistry, TaskRegistry, TeamManager, team_tool_handlers};
 
 #[derive(Clone)]
 pub struct AskApp {
@@ -20,7 +18,11 @@ pub struct AskApp {
 }
 
 impl AskApp {
-    pub fn new(llm: Arc<OpenAiCompatClient>, runtime: Arc<ConversationRuntime>, transcript_dir: String) -> Self {
+    pub fn new(
+        llm: Arc<OpenAiCompatClient>,
+        runtime: Arc<ConversationRuntime>,
+        transcript_dir: String,
+    ) -> Self {
         Self {
             llm,
             runtime,
@@ -77,7 +79,18 @@ impl AskApp {
     }
 
     pub fn new_session(&self, initial_prompt: String) -> Result<ConversationSession> {
-        let session = ConversationSession::new(initial_prompt, self.llm.system_prompt(), &self.transcript_dir)?;
+        let session = ConversationSession::new(
+            initial_prompt,
+            self.llm.system_prompt(),
+            &self.transcript_dir,
+        )?;
+        session.save()?;
+        Ok(session)
+    }
+
+    pub fn new_empty_session(&self) -> Result<ConversationSession> {
+        let session =
+            ConversationSession::new_empty(self.llm.system_prompt(), &self.transcript_dir)?;
         session.save()?;
         Ok(session)
     }
@@ -87,7 +100,9 @@ impl AskApp {
         session: &mut ConversationSession,
         event_sink: Option<RuntimeEventSink>,
     ) -> Result<String> {
-        let answer = self.runtime.run_session_turn_with_events(session, event_sink)?;
+        let answer = self
+            .runtime
+            .run_session_turn_with_events(session, event_sink)?;
         session.save()?;
         Ok(answer)
     }

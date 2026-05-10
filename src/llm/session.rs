@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::llm::usage::PromptCacheStats;
 
@@ -29,25 +29,32 @@ pub struct ConversationSession {
 
 impl ConversationSession {
     pub fn new(initial_prompt: String, system_prompt: &str, transcript_dir: &str) -> Result<Self> {
+        let mut session = Self::new_empty(system_prompt, transcript_dir)?;
+        session.append_user_prompt(initial_prompt);
+        Ok(session)
+    }
+
+    pub fn new_empty(system_prompt: &str, transcript_dir: &str) -> Result<Self> {
         let created_at_unix_ms = now_unix_ms()?;
         let session_id = format!("session_{}", created_at_unix_ms);
 
-        let mut messages = Vec::new();
-        messages.push(json!({"role": "system", "content": system_prompt}));
-        messages.push(json!({"role": "user", "content": initial_prompt.clone()}));
+        let messages = vec![json!({"role": "system", "content": system_prompt})];
 
         let snapshot = ConversationSessionSnapshot {
             schema_version: SESSION_SCHEMA_VERSION,
             session_id: session_id.clone(),
             created_at_unix_ms,
             updated_at_unix_ms: created_at_unix_ms,
-            prompt_history: vec![initial_prompt],
+            prompt_history: Vec::new(),
             messages,
             prompt_cache_stats: PromptCacheStats::default(),
         };
 
         let session_path = session_snapshot_path(transcript_dir, &session_id);
-        Ok(Self { snapshot, session_path })
+        Ok(Self {
+            snapshot,
+            session_path,
+        })
     }
 
     pub fn load(session_path: impl AsRef<Path>) -> Result<Self> {
@@ -65,7 +72,10 @@ impl ConversationSession {
             );
         }
 
-        Ok(Self { snapshot, session_path })
+        Ok(Self {
+            snapshot,
+            session_path,
+        })
     }
 
     pub fn messages_and_prompt_cache_stats_mut(
@@ -77,22 +87,30 @@ impl ConversationSession {
 
     pub fn append_user_prompt(&mut self, prompt: String) {
         self.snapshot.prompt_history.push(prompt.clone());
-        self.snapshot.messages.push(json!({"role": "user", "content": prompt}));
-        self.snapshot.updated_at_unix_ms = now_unix_ms().unwrap_or(self.snapshot.updated_at_unix_ms);
+        self.snapshot
+            .messages
+            .push(json!({"role": "user", "content": prompt}));
+        self.snapshot.updated_at_unix_ms =
+            now_unix_ms().unwrap_or(self.snapshot.updated_at_unix_ms);
     }
 
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.session_path.parent() {
             if !parent.as_os_str().is_empty() {
-                create_dir_all(parent)
-                    .with_context(|| format!("failed to create session dir: {}", parent.display()))?;
+                create_dir_all(parent).with_context(|| {
+                    format!("failed to create session dir: {}", parent.display())
+                })?;
             }
         }
 
         let payload = serde_json::to_string_pretty(&self.snapshot)
             .context("failed to serialize conversation session")?;
-        write(&self.session_path, payload)
-            .with_context(|| format!("failed to write session file: {}", self.session_path.display()))?;
+        write(&self.session_path, payload).with_context(|| {
+            format!(
+                "failed to write session file: {}",
+                self.session_path.display()
+            )
+        })?;
         Ok(())
     }
 

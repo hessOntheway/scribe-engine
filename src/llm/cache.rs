@@ -1,4 +1,4 @@
-use std::fs::{create_dir_all, File, OpenOptions};
+use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +24,8 @@ struct PromptCacheEntry {
 impl PromptCache {
     pub fn new(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
-        create_dir_all(&dir).with_context(|| format!("failed to create prompt cache dir: {}", dir.display()))?;
+        create_dir_all(&dir)
+            .with_context(|| format!("failed to create prompt cache dir: {}", dir.display()))?;
         Ok(Self { dir })
     }
 
@@ -62,11 +63,16 @@ impl PromptCache {
 
         let path = self.entry_path(key);
         let tmp_path = path.with_extension("json.tmp");
-        create_dir_all(&self.dir)
-            .with_context(|| format!("failed to create prompt cache dir: {}", self.dir.display()))?;
+        create_dir_all(&self.dir).with_context(|| {
+            format!("failed to create prompt cache dir: {}", self.dir.display())
+        })?;
         if let Some(parent) = tmp_path.parent() {
-            create_dir_all(parent)
-                .with_context(|| format!("failed to create prompt cache parent dir: {}", parent.display()))?;
+            create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create prompt cache parent dir: {}",
+                    parent.display()
+                )
+            })?;
         }
         let contents = serde_json::to_string_pretty(&entry)
             .context("failed to serialize prompt cache entry")?;
@@ -75,9 +81,18 @@ impl PromptCache {
             .create(true)
             .truncate(true)
             .open(&tmp_path)
-            .with_context(|| format!("failed to create prompt cache temp file: {}", tmp_path.display()))?;
-        file.write_all(contents.as_bytes())
-            .with_context(|| format!("failed to write prompt cache temp file: {}", tmp_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "failed to create prompt cache temp file: {}",
+                    tmp_path.display()
+                )
+            })?;
+        file.write_all(contents.as_bytes()).with_context(|| {
+            format!(
+                "failed to write prompt cache temp file: {}",
+                tmp_path.display()
+            )
+        })?;
         std::fs::rename(&tmp_path, &path)
             .with_context(|| format!("failed to persist prompt cache entry: {}", path.display()))?;
         Ok(())
@@ -91,8 +106,8 @@ impl PromptCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::usage::ModelUsage;
     use crate::llm::openai::ChatCompletionResult;
+    use crate::llm::usage::ModelUsage;
     use serde_json::json;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -121,8 +136,13 @@ mod tests {
             cached: false,
         };
 
-        cache.store(request_key, &response).expect("store cache entry");
-        let loaded = cache.lookup(request_key).expect("lookup cache entry").expect("entry present");
+        cache
+            .store(request_key, &response)
+            .expect("store cache entry");
+        let loaded = cache
+            .lookup(request_key)
+            .expect("lookup cache entry")
+            .expect("entry present");
 
         assert_eq!(loaded.message, response.message);
         assert_eq!(loaded.usage.input_tokens, response.usage.input_tokens);

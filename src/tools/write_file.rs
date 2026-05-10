@@ -39,8 +39,9 @@ pub fn write_file_handler() -> ToolHandler {
 
         let path = validate_write_path(&input.path)?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create parent directories for {}", path.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create parent directories for {}", path.display())
+            })?;
         }
 
         fs::write(&path, input.content)
