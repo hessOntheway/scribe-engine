@@ -161,10 +161,12 @@ fn resolve_file_path(workspace_root: &Path, path: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::fs::{create_dir_all, write};
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_workspace() -> PathBuf {
         let ts_nanos = SystemTime::now()
@@ -179,6 +181,7 @@ mod tests {
 
     #[test]
     fn read_file_reads_full_file() {
+        let _guard = TEST_CWD_LOCK.lock().expect("lock cwd test mutex");
         let workspace = unique_workspace();
         let file_path = workspace.join("sample.txt");
         write(&file_path, "alpha\nbeta\ngamma\n").expect("write file");
@@ -201,6 +204,7 @@ mod tests {
 
     #[test]
     fn read_file_reads_requested_range() {
+        let _guard = TEST_CWD_LOCK.lock().expect("lock cwd test mutex");
         let workspace = unique_workspace();
         let file_path = workspace.join("sample.txt");
         write(&file_path, "alpha\nbeta\ngamma\ndelta\n").expect("write file");
@@ -225,6 +229,7 @@ mod tests {
 
     #[test]
     fn read_file_rejects_path_escape() {
+        let _guard = TEST_CWD_LOCK.lock().expect("lock cwd test mutex");
         let workspace = unique_workspace();
         let input = ReadFileInput {
             path: "../Cargo.toml".to_string(),

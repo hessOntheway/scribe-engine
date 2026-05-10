@@ -1,3 +1,4 @@
+mod agents;
 mod ask;
 mod cli;
 mod compact;

@@ -122,6 +122,10 @@ pub fn auto_compact_if_needed(
     let keep_from = messages
         .len()
         .saturating_sub(cfg.auto_preserve_recent_messages);
+    let keep_from = adjust_keep_from_to_tool_boundary(messages, keep_from);
+    if keep_from == 0 {
+        return Ok(None);
+    }
     let removed = messages[..keep_from].to_vec();
     let summary_source = build_compact_summary_source(&removed);
     let summary = match generate_compact_summary(
@@ -154,6 +158,109 @@ pub fn auto_compact_if_needed(
         estimated_tokens_before,
         transcript_path,
     }))
+}
+
+pub fn remove_orphan_tool_messages(messages: &mut Vec<Value>) -> usize {
+    let mut cleaned = Vec::with_capacity(messages.len());
+    let mut pending_tool_call_ids: Vec<String> = Vec::new();
+    let mut removed = 0usize;
+
+    for message in messages.drain(..) {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+
+        if role == "tool" {
+            let tool_call_id = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if let Some(position) = pending_tool_call_ids
+                .iter()
+                .position(|id| id.as_str() == tool_call_id)
+            {
+                pending_tool_call_ids.remove(position);
+                cleaned.push(message);
+            } else {
+                removed += 1;
+            }
+            continue;
+        }
+
+        if !pending_tool_call_ids.is_empty() {
+            let Some(previous) = cleaned.last_mut() else {
+                pending_tool_call_ids.clear();
+                cleaned.push(message);
+                continue;
+            };
+
+            if previous.get("role").and_then(Value::as_str) == Some("assistant")
+                && previous.get("tool_calls").is_some()
+            {
+                previous.as_object_mut().map(|obj| obj.remove("tool_calls"));
+            }
+            pending_tool_call_ids.clear();
+        }
+
+        pending_tool_call_ids = assistant_tool_call_ids(&message);
+        cleaned.push(message);
+    }
+
+    if !pending_tool_call_ids.is_empty() {
+        if let Some(previous) = cleaned.last_mut() {
+            if previous.get("role").and_then(Value::as_str) == Some("assistant")
+                && previous.get("tool_calls").is_some()
+            {
+                previous.as_object_mut().map(|obj| obj.remove("tool_calls"));
+            }
+        }
+    }
+
+    *messages = cleaned;
+    removed
+}
+
+fn adjust_keep_from_to_tool_boundary(messages: &[Value], mut keep_from: usize) -> usize {
+    while keep_from > 0
+        && messages
+            .get(keep_from)
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str)
+            == Some("tool")
+    {
+        keep_from -= 1;
+    }
+
+    if keep_from > 0
+        && messages
+            .get(keep_from)
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str)
+            == Some("assistant")
+        && messages
+            .get(keep_from)
+            .and_then(|m| m.get("tool_calls"))
+            .is_some()
+    {
+        return keep_from;
+    }
+
+    keep_from
+}
+
+fn assistant_tool_call_ids(message: &Value) -> Vec<String> {
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| call.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn generate_compact_summary(
@@ -333,6 +440,67 @@ mod tests {
                 .map(|s| s.chars().count()),
             Some(200)
         );
+    }
+
+    #[test]
+    fn removes_orphan_tool_messages() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "summary"}),
+            json!({"role": "tool", "tool_call_id": "old_call", "content": "orphan"}),
+            json!({"role": "user", "content": "continue"}),
+        ];
+
+        let removed = remove_orphan_tool_messages(&mut messages);
+
+        assert_eq!(removed, 1);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1].get("role").and_then(Value::as_str),
+            Some("user")
+        );
+    }
+
+    #[test]
+    fn keeps_valid_tool_call_pairs() {
+        let mut messages = vec![
+            json!({
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": { "name": "read_file", "arguments": "{}" }
+                    }
+                ]
+            }),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "result"}),
+            json!({"role": "user", "content": "continue"}),
+        ];
+
+        let removed = remove_orphan_tool_messages(&mut messages);
+
+        assert_eq!(removed, 0);
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn compact_boundary_moves_before_tool_pair() {
+        let messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "old"}),
+            json!({
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": { "name": "read_file", "arguments": "{}" }
+                    }
+                ]
+            }),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "result"}),
+            json!({"role": "user", "content": "new"}),
+        ];
+
+        assert_eq!(adjust_keep_from_to_tool_boundary(&messages, 3), 2);
     }
 
     #[test]

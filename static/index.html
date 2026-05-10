@@ -7,16 +7,24 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>Scribe Live Workspace</title>
-    <link rel="stylesheet" href="./styles.css?v=20260510b" />
+    <link rel="stylesheet" href="./styles.css?v=20260510c" />
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
         <div class="brand-panel">
           <p class="eyebrow">Scribe Engine</p>
-          <h1>Live Agent</h1>
-          <p class="subtle">一个服务、一个前端页面、一个持续运行的多轮对话工作台。</p>
+          <h1>Interview Agents</h1>
+          <p class="subtle">Two coordinated agents: one prepares architecture interview material, one conducts the interview.</p>
         </div>
+
+        <section class="status-panel">
+          <p class="meta-label">Agent</p>
+          <div class="agent-switcher">
+            <button id="materials-agent-button" class="agent-tab active" type="button">Materials</button>
+            <button id="interview-agent-button" class="agent-tab" type="button">Interview</button>
+          </div>
+        </section>
 
         <section class="status-panel">
           <div class="status-line">
@@ -26,6 +34,10 @@
           <div class="status-line">
             <span class="meta-label">Runtime</span>
             <span id="run-status" class="chip neutral">Idle</span>
+          </div>
+          <div class="status-line">
+            <span class="meta-label">Active Agent</span>
+            <span id="active-agent-meta" class="meta-value">Materials</span>
           </div>
           <div class="status-line">
             <span class="meta-label">Live Session</span>
@@ -38,6 +50,18 @@
         </section>
 
         <section class="status-panel">
+          <div class="status-line">
+            <span class="meta-label">Materials</span>
+            <span id="materials-status" class="meta-value">Missing</span>
+          </div>
+          <div class="status-line">
+            <span class="meta-label">Interview</span>
+            <span id="interview-status" class="meta-value">Not started</span>
+          </div>
+          <div class="status-line">
+            <span class="meta-label">Phase</span>
+            <span id="interview-phase" class="meta-value">INIT</span>
+          </div>
           <div class="status-line">
             <span class="meta-label">Tool Steps</span>
             <span id="tool-step-count" class="meta-value">0</span>
@@ -57,16 +81,21 @@
         </section>
 
         <section class="status-panel tips-panel">
-          <p class="meta-label">Notes</p>
-          <p class="subtle">服务端会保存会话文件与当前 UI 快照，页面刷新后会回到你上次打开的那个会话。</p>
-          <p class="subtle">切换会话会载入对应历史；发送新消息时，只会追加当前这一轮的新内容。</p>
+          <p class="meta-label">Interview Actions</p>
+          <div class="action-stack">
+            <button id="start-interview-button" class="secondary-button" type="button">Start Interview</button>
+            <button id="finish-interview-button" class="secondary-button" type="button">Finish Interview</button>
+            <button id="view-report-button" class="secondary-button" type="button">View Report</button>
+          </div>
+          <p id="materials-path" class="subtle">Materials path unavailable</p>
+          <p class="subtle">Sessions are saved independently; switching sessions restores that interview workflow.</p>
         </section>
       </aside>
 
       <main class="workspace">
         <header class="workspace-header">
           <div>
-            <p class="eyebrow">Multi Session Workspace</p>
+            <p id="agent-eyebrow" class="eyebrow">Interview Materials</p>
             <h2 id="conversation-title">Live conversation</h2>
           </div>
           <div class="header-meta">
@@ -76,18 +105,19 @@
         </header>
 
         <section id="message-stream" class="message-stream" aria-live="polite"></section>
+        <section id="report-panel" class="report-panel" hidden></section>
 
         <footer class="composer">
           <div class="composer-shell">
-            <label class="composer-label" for="prompt-input">Message the live agent</label>
+            <label id="composer-label" class="composer-label" for="prompt-input">Message the materials agent</label>
             <textarea
               id="prompt-input"
               rows="4"
-              placeholder="Pick a session to continue, or start a new one here..."
+              placeholder="Ask the materials agent to analyze this codebase and write .transcripts/interview_materials/latest_materials.md..."
             ></textarea>
           </div>
           <div class="composer-actions">
-            <p class="subtle">当前输入会发到右上角正在显示的那个会话。</p>
+            <p id="composer-help" class="subtle">Generate or refine interview materials before starting the interview.</p>
             <button id="send-button" class="primary-button" type="button">Send</button>
           </div>
         </footer>
@@ -107,6 +137,6 @@
       </article>
     </template>
 
-    <script type="module" src="./app.js?v=20260510b"></script>
+    <script type="module" src="./app.js?v=20260510c"></script>
   </body>
 </html>

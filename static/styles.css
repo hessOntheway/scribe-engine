@@ -157,13 +157,58 @@ h4 {
 .role-badge,
 .message-kind,
 .trace-count,
-.inline-button {
+.inline-button,
+.agent-tab {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 650;
+}
+
+.agent-switcher,
+.action-stack {
+  display: flex;
+  gap: 8px;
+}
+
+.agent-switcher {
+  flex-wrap: wrap;
+}
+
+.action-stack {
+  flex-direction: column;
+}
+
+.agent-tab,
+.secondary-button {
+  border: 1px solid var(--line);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.agent-tab {
+  padding: 8px 11px;
+}
+
+.agent-tab.active {
+  border-color: rgba(108, 182, 255, 0.52);
+  background: rgba(108, 182, 255, 0.16);
+  color: var(--accent);
+}
+
+.secondary-button {
+  width: 100%;
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-weight: 650;
+}
+
+.secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .chip,
@@ -299,6 +344,24 @@ h4 {
 .message-stream {
   overflow: auto;
   padding-right: 4px;
+}
+
+.report-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 14px;
+  overflow: auto;
+  max-height: 38vh;
+}
+
+.report-panel pre {
+  margin: 12px 0 0;
+  white-space: pre-wrap;
+  line-height: 1.58;
+  color: var(--text);
+  font-family: var(--font-body);
 }
 
 .conversation-stack {

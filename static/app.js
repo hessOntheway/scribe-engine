@@ -17,28 +17,46 @@ mermaid.initialize({
 });
 
 const state = {
+  workflow: null,
+  activeAgent: "interview_materials",
   snapshot: null,
   sessions: [],
+  snapshots: {},
   messages: [],
   status: "idle",
   lastError: "",
   isRunning: false,
+  reportText: "",
 };
 
 const nodes = {
   connectionStatus: document.querySelector("#connection-status"),
   runStatus: document.querySelector("#run-status"),
   headerStatus: document.querySelector("#header-status"),
+  activeAgentMeta: document.querySelector("#active-agent-meta"),
   sessionMeta: document.querySelector("#session-meta"),
   sessionList: document.querySelector("#session-list"),
   turnMeta: document.querySelector("#turn-meta"),
   toolStepCount: document.querySelector("#tool-step-count"),
   errorMeta: document.querySelector("#error-meta"),
+  materialsStatus: document.querySelector("#materials-status"),
+  materialsPath: document.querySelector("#materials-path"),
+  interviewStatus: document.querySelector("#interview-status"),
+  interviewPhase: document.querySelector("#interview-phase"),
+  agentEyebrow: document.querySelector("#agent-eyebrow"),
   conversationTitle: document.querySelector("#conversation-title"),
   messageStream: document.querySelector("#message-stream"),
+  reportPanel: document.querySelector("#report-panel"),
   promptInput: document.querySelector("#prompt-input"),
+  composerLabel: document.querySelector("#composer-label"),
+  composerHelp: document.querySelector("#composer-help"),
   sendButton: document.querySelector("#send-button"),
   newSessionButton: document.querySelector("#new-session-button"),
+  materialsAgentButton: document.querySelector("#materials-agent-button"),
+  interviewAgentButton: document.querySelector("#interview-agent-button"),
+  startInterviewButton: document.querySelector("#start-interview-button"),
+  finishInterviewButton: document.querySelector("#finish-interview-button"),
+  viewReportButton: document.querySelector("#view-report-button"),
   messageTemplate: document.querySelector("#message-template"),
 };
 
@@ -53,6 +71,11 @@ async function bootstrap() {
 function bindEvents() {
   nodes.sendButton.addEventListener("click", onSend);
   nodes.newSessionButton.addEventListener("click", onNewSession);
+  nodes.materialsAgentButton.addEventListener("click", () => switchAgent("interview_materials"));
+  nodes.interviewAgentButton.addEventListener("click", () => switchAgent("programmer_interview"));
+  nodes.startInterviewButton.addEventListener("click", onStartInterview);
+  nodes.finishInterviewButton.addEventListener("click", onFinishInterview);
+  nodes.viewReportButton.addEventListener("click", onViewReport);
   nodes.promptInput.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
@@ -63,7 +86,10 @@ function bindEvents() {
 
 async function loadLiveSnapshot() {
   try {
-    const snapshot = await requestJson("/api/live");
+    const workflow = await requestJson("/api/workflow");
+    state.workflow = workflow;
+    state.activeAgent = workflow.active_agent || "interview_materials";
+    const snapshot = await requestJson(`/api/agents/${state.activeAgent}/live`);
     applySnapshot(snapshot);
   } catch (error) {
     state.lastError = error instanceof Error ? error.message : String(error);
@@ -92,7 +118,7 @@ async function onSend() {
   render();
 
   try {
-    const response = await requestJson("/api/live/messages", {
+    const response = await requestJson(`/api/agents/${state.activeAgent}/messages`, {
       method: "POST",
       body: JSON.stringify({ prompt }),
     });
@@ -100,15 +126,18 @@ async function onSend() {
     nodes.promptInput.value = "";
     state.messages.push(...(response.new_messages || []));
     state.snapshot = {
+      agent_kind: response.agent_kind || state.activeAgent,
       title: response.title || state.snapshot?.title || "Live conversation",
       session_id: response.session_id || null,
       status: response.status || "waiting_for_input",
       last_error: response.last_error || null,
       messages: state.messages,
     };
+    state.snapshots[state.activeAgent] = state.snapshot;
     state.status = response.status || "waiting_for_input";
     state.lastError = response.last_error || "";
     await loadSessions();
+    await refreshWorkflow();
   } catch (error) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
@@ -123,27 +152,73 @@ async function onNewSession() {
     return;
   }
 
+  state.isRunning = true;
   state.lastError = "";
+  state.reportText = "";
   render();
 
   try {
     const snapshot = await requestJson("/api/live/session/new", { method: "POST" });
     applySnapshot(snapshot);
+    state.snapshots = { [state.activeAgent]: state.snapshot };
+    await refreshWorkflow();
     await loadSessions();
   } catch (error) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
   } finally {
+    state.isRunning = false;
+    render();
+  }
+}
+
+async function switchAgent(agentKind) {
+  if (state.isRunning || state.activeAgent === agentKind) {
+    return;
+  }
+  state.activeAgent = agentKind;
+  state.lastError = "";
+  state.reportText = "";
+  try {
+    const snapshot = state.snapshots[agentKind] || await requestJson(`/api/agents/${agentKind}/live`);
+    applySnapshot(snapshot);
+  } catch (error) {
+    state.status = "error";
+    state.lastError = error instanceof Error ? error.message : String(error);
+  }
+  render();
+}
+
+async function onStartInterview() {
+  if (state.isRunning) {
+    return;
+  }
+  state.isRunning = true;
+  state.lastError = "";
+  render();
+  try {
+    const snapshot = await requestJson("/api/interview/start", { method: "POST" });
+    state.activeAgent = "programmer_interview";
+    applySnapshot(snapshot);
+    await refreshWorkflow();
+    await loadSessions();
+  } catch (error) {
+    state.status = "error";
+    state.lastError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.isRunning = false;
     render();
   }
 }
 
 async function onSelectSession(sessionId) {
-  if (state.isRunning || sessionId === state.snapshot?.session_id) {
+  if (state.isRunning) {
     return;
   }
 
+  state.isRunning = true;
   state.lastError = "";
+  state.reportText = "";
   render();
 
   try {
@@ -152,18 +227,69 @@ async function onSelectSession(sessionId) {
       body: JSON.stringify({ session_id: sessionId }),
     });
     applySnapshot(snapshot);
+    state.snapshots = { [state.activeAgent]: state.snapshot };
+    await refreshWorkflow();
     await loadSessions();
   } catch (error) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
   } finally {
+    state.isRunning = false;
     render();
   }
 }
 
+async function onFinishInterview() {
+  if (state.isRunning) {
+    return;
+  }
+  state.isRunning = true;
+  state.lastError = "";
+  render();
+  try {
+    const response = await requestJson("/api/interview/finish", { method: "POST" });
+    state.activeAgent = "programmer_interview";
+    state.messages.push(...(response.new_messages || []));
+    state.snapshot = {
+      agent_kind: response.agent_kind || "programmer_interview",
+      title: response.title || state.snapshot?.title || "Programmer interview agent",
+      session_id: response.session_id || null,
+      status: response.status || "waiting_for_input",
+      last_error: response.last_error || null,
+      messages: state.messages,
+    };
+    state.snapshots[state.activeAgent] = state.snapshot;
+    await refreshWorkflow();
+    await loadSessions();
+    await onViewReport();
+  } catch (error) {
+    state.status = "error";
+    state.lastError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.isRunning = false;
+    render();
+  }
+}
+
+async function onViewReport() {
+  try {
+    state.reportText = await requestText("/api/interview/report");
+  } catch (error) {
+    state.lastError = error instanceof Error ? error.message : String(error);
+    state.reportText = "";
+  }
+  render();
+}
+
+async function refreshWorkflow() {
+  state.workflow = await requestJson("/api/workflow");
+}
+
 function applySnapshot(snapshot) {
   state.snapshot = snapshot;
+  state.activeAgent = snapshot.agent_kind || state.activeAgent;
   state.messages = [...(snapshot.messages || [])];
+  state.snapshots[state.activeAgent] = state.snapshot;
   state.status = snapshot.status || "idle";
   state.lastError = snapshot.last_error || "";
 }
@@ -172,16 +298,24 @@ function render() {
   renderHeaderState();
   renderSessions();
   renderMessages();
+  renderReport();
 }
 
 function renderHeaderState() {
-  nodes.conversationTitle.textContent = state.snapshot?.title || "Live conversation";
+  const isInterview = state.activeAgent === "programmer_interview";
+  nodes.agentEyebrow.textContent = isInterview ? "Programmer Interview" : "Interview Materials";
+  nodes.conversationTitle.textContent = state.snapshot?.title || agentTitle(state.activeAgent);
+  nodes.activeAgentMeta.textContent = isInterview ? "Interview" : "Materials";
   nodes.sessionMeta.textContent = state.snapshot?.session_id || "Not initialized";
   nodes.turnMeta.textContent = summarizeTurnCount(state.messages);
   nodes.toolStepCount.textContent = String(
     state.messages.filter((message) => message.kind === "tool_call" || message.kind === "tool_result").length,
   );
   nodes.errorMeta.textContent = state.lastError || "None";
+  nodes.materialsStatus.textContent = state.workflow?.materials?.exists ? "Generated" : "Missing";
+  nodes.materialsPath.textContent = state.workflow?.materials?.path || "Materials path unavailable";
+  nodes.interviewStatus.textContent = formatInterviewStatus(state.workflow?.interview_status || "not_started");
+  nodes.interviewPhase.textContent = state.workflow?.interview_phase || "INIT";
 
   setChip(nodes.connectionStatus, "connected", "HTTP");
   setChip(nodes.runStatus, state.isRunning ? "thinking" : state.status, formatStatus(state.isRunning ? "running" : state.status));
@@ -190,6 +324,18 @@ function renderHeaderState() {
   nodes.sendButton.disabled = state.isRunning;
   nodes.promptInput.disabled = state.isRunning;
   nodes.newSessionButton.disabled = state.isRunning;
+  nodes.startInterviewButton.disabled = state.isRunning || !state.workflow?.materials?.exists;
+  nodes.finishInterviewButton.disabled = state.isRunning || state.workflow?.interview_status !== "in_progress";
+  nodes.viewReportButton.disabled = state.isRunning || !state.workflow?.report;
+  nodes.materialsAgentButton.classList.toggle("active", !isInterview);
+  nodes.interviewAgentButton.classList.toggle("active", isInterview);
+  nodes.composerLabel.textContent = isInterview ? "Answer the interviewer" : "Message the materials agent";
+  nodes.composerHelp.textContent = isInterview
+    ? "Reply as the programmer candidate. The interviewer uses only generated materials."
+    : "Generate or refine interview materials before starting the interview.";
+  nodes.promptInput.placeholder = isInterview
+    ? "Answer the current interview question..."
+    : "Ask the materials agent to analyze this codebase and write .transcripts/interview_materials/latest_materials.md...";
 }
 
 function renderSessions() {
@@ -206,15 +352,11 @@ function renderSessions() {
       <strong>New session</strong>
       <span class="session-time">Draft</span>
     </div>
-    <p class="subtle">Start fresh without losing the older conversations.</p>
+    <p class="subtle">Start a separate materials and interview workflow.</p>
   `;
   nodes.sessionList.append(draftCard);
 
-  if (state.sessions.length === 0) {
-    return;
-  }
-
-  for (const session of state.sessions) {
+  for (const session of state.sessions || []) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-card ${session.is_active ? "active" : ""}`;
@@ -228,7 +370,7 @@ function renderSessions() {
         <span class="session-time">${formatTimestamp(session.updated_at_unix_ms)}</span>
       </div>
       <p class="subtle">${escapeHtml(session.session_id)}</p>
-      <p class="subtle">${turnCount} turn${turnCount === 1 ? "" : "s"} · ${session.message_count} messages</p>
+      <p class="subtle">${turnCount} turn${turnCount === 1 ? "" : "s"} · ${formatInterviewStatus(session.interview_status || "not_started")}</p>
     `;
 
     nodes.sessionList.append(button);
@@ -242,7 +384,9 @@ function renderMessages() {
     nodes.messageStream.append(
       createEmptyState(
         "Start the live conversation",
-        "发送第一条消息后，服务端会同步执行完整一轮，然后把新增的 user、assistant 和 tool 消息返回给这个页面。",
+        state.activeAgent === "programmer_interview"
+          ? "Start the interview after generating materials, then answer one question at a time."
+          : "Send a prompt to analyze the codebase and generate interview materials.",
       ),
     );
     return;
@@ -272,6 +416,33 @@ function renderMessages() {
 
   nodes.messageStream.append(container);
   scrollToBottom();
+}
+
+function renderReport() {
+  if (!state.reportText) {
+    nodes.reportPanel.hidden = true;
+    nodes.reportPanel.innerHTML = "";
+    return;
+  }
+
+  nodes.reportPanel.hidden = false;
+  nodes.reportPanel.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "block-head";
+  const title = document.createElement("h3");
+  title.textContent = "Evaluation Report";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "inline-button";
+  close.textContent = "Hide";
+  close.addEventListener("click", () => {
+    state.reportText = "";
+    render();
+  });
+  head.append(title, close);
+  const pre = document.createElement("pre");
+  pre.textContent = state.reportText;
+  nodes.reportPanel.append(head, pre);
 }
 
 function groupMessagesIntoTurns(messages) {
@@ -381,7 +552,7 @@ function renderAssistantTurn(group) {
   row.classList.add("assistant");
   stack.classList.add("message-card");
   avatar.textContent = "A";
-  roleBadge.textContent = "Assistant";
+  roleBadge.textContent = state.activeAgent === "programmer_interview" ? "Interviewer" : "Assistant";
   kindLabel.textContent = group.traces.length > 0 ? "reply · traced" : "reply";
 
   for (const block of group.assistant.render_blocks || []) {
@@ -600,6 +771,23 @@ async function requestJson(url, options = {}) {
   return data;
 }
 
+async function requestText(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  if (!response.ok) {
+    try {
+      const data = JSON.parse(text);
+      throw new Error(data.error || `Request failed: ${response.status}`);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(text || `Request failed: ${response.status}`);
+      }
+      throw error;
+    }
+  }
+  return text;
+}
+
 function setChip(node, status, label) {
   node.textContent = label;
   node.className = `chip ${status || "neutral"}`;
@@ -633,6 +821,19 @@ function describeStatus() {
 function summarizeTurnCount(messages) {
   const turnIds = new Set(messages.map((message) => message.turn_id).filter(Boolean));
   return turnIds.size > 0 ? `${turnIds.size} turns` : "-";
+}
+
+function agentTitle(agentKind) {
+  return agentKind === "programmer_interview" ? "Programmer interview agent" : "Interview material generator";
+}
+
+function formatInterviewStatus(status) {
+  const labels = {
+    not_started: "Not started",
+    in_progress: "In progress",
+    completed: "Completed",
+  };
+  return labels[status] || status;
 }
 
 function avatarLabel(role) {

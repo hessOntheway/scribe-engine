@@ -69,6 +69,12 @@ pub struct GlobalToolRegistry {
 }
 
 impl GlobalToolRegistry {
+    pub fn empty() -> Self {
+        Self {
+            handlers: HashMap::new(),
+        }
+    }
+
     pub fn builtins() -> Self {
         let mut handlers = HashMap::new();
 
@@ -148,6 +154,32 @@ impl GlobalToolRegistry {
             .with_context(|| format!("unsupported tool: {}", name))?;
         handler.run(input_json)
     }
+
+    #[cfg(test)]
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.handlers.contains_key(name)
+    }
 }
 
 pub mod task;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interviewer_registry_can_be_empty() {
+        let registry = GlobalToolRegistry::empty();
+        assert!(!registry.has_tool("read_file"));
+        assert!(registry.definitions().is_empty());
+    }
+
+    #[test]
+    fn materials_registry_has_code_inspection_tools() {
+        let registry = GlobalToolRegistry::builtins();
+        assert!(registry.has_tool("glob_search"));
+        assert!(registry.has_tool("grep_search"));
+        assert!(registry.has_tool("read_file"));
+        assert!(registry.has_tool("write_file"));
+    }
+}

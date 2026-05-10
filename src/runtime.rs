@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::compact::{apply_micro_compact, auto_compact_if_needed};
+use crate::compact::{apply_micro_compact, auto_compact_if_needed, remove_orphan_tool_messages};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::llm::session::ConversationSession;
 use crate::llm::usage::PromptCacheStats;
@@ -97,6 +97,13 @@ impl AgentLoop {
         let mut prompt_cache_stats = prompt_cache_stats;
 
         for _ in 0..self.max_steps {
+            let removed_orphan_tools = remove_orphan_tool_messages(messages);
+            if removed_orphan_tools > 0 {
+                eprintln!(
+                    "warn: removed {} orphan tool messages before model request",
+                    removed_orphan_tools
+                );
+            }
             apply_micro_compact(messages, &compact_cfg);
             if let Some(event) = auto_compact_if_needed(
                 messages,

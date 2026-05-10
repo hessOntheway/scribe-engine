@@ -15,6 +15,7 @@ use crate::llm::cache::PromptCache;
 use crate::llm::usage::ModelUsage;
 use crate::tools::ToolDefinition;
 
+#[allow(dead_code)]
 const SYSTEM_PROMPT: &str = r#"You are a code and architecture analysis assistant for software projects.
 
 # Mission
@@ -110,6 +111,7 @@ impl OpenAiCompatClient {
         Ok(Self { http, cfg, cache })
     }
 
+    #[allow(dead_code)]
     pub fn system_prompt(&self) -> &str {
         SYSTEM_PROMPT
     }

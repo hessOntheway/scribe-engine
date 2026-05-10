@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::agents::AgentKind;
 use crate::config::LlmConfig;
 use crate::llm::openai::OpenAiCompatClient;
 use crate::llm::session::{ConversationSession, ConversationSessionSnapshot};
@@ -12,20 +13,20 @@ use crate::tools::{GlobalToolRegistry, TaskRegistry, TeamManager, team_tool_hand
 
 #[derive(Clone)]
 pub struct AskApp {
-    llm: Arc<OpenAiCompatClient>,
-    runtime: Arc<ConversationRuntime>,
+    materials_runtime: Arc<ConversationRuntime>,
+    interviewer_runtime: Arc<ConversationRuntime>,
     transcript_dir: String,
 }
 
 impl AskApp {
     pub fn new(
-        llm: Arc<OpenAiCompatClient>,
-        runtime: Arc<ConversationRuntime>,
+        materials_runtime: Arc<ConversationRuntime>,
+        interviewer_runtime: Arc<ConversationRuntime>,
         transcript_dir: String,
     ) -> Self {
         Self {
-            llm,
-            runtime,
+            materials_runtime,
+            interviewer_runtime,
             transcript_dir,
         }
     }
@@ -69,78 +70,143 @@ impl AskApp {
             parent_registry = parent_registry.with_tool(tool)?;
         }
 
-        let runtime = Arc::new(ConversationRuntime::new(
+        let materials_runtime = Arc::new(ConversationRuntime::new(
             Arc::clone(&llm),
             Arc::new(parent_registry),
             max_steps,
         ));
 
-        Ok(Self::new(llm, runtime, transcript_dir))
+        let interviewer_runtime = Arc::new(ConversationRuntime::new(
+            Arc::clone(&llm),
+            Arc::new(GlobalToolRegistry::empty()),
+            max_steps,
+        ));
+
+        Ok(Self::new(
+            materials_runtime,
+            interviewer_runtime,
+            transcript_dir,
+        ))
     }
 
-    pub fn new_session(&self, initial_prompt: String) -> Result<ConversationSession> {
+    pub fn new_session(
+        &self,
+        agent_kind: AgentKind,
+        initial_prompt: String,
+    ) -> Result<ConversationSession> {
         let session = ConversationSession::new(
+            agent_kind,
             initial_prompt,
-            self.llm.system_prompt(),
+            agent_kind.system_prompt(),
             &self.transcript_dir,
         )?;
         session.save()?;
         Ok(session)
     }
 
-    pub fn new_empty_session(&self) -> Result<ConversationSession> {
-        let session =
-            ConversationSession::new_empty(self.llm.system_prompt(), &self.transcript_dir)?;
+    pub fn new_empty_session(&self, agent_kind: AgentKind) -> Result<ConversationSession> {
+        let session = ConversationSession::new_empty(
+            agent_kind,
+            agent_kind.system_prompt(),
+            &self.transcript_dir,
+        )?;
+        session.save()?;
+        Ok(session)
+    }
+
+    pub fn new_seeded_interview_session(
+        &self,
+        session_id: String,
+        materials: &str,
+        initial_prompt: String,
+    ) -> Result<ConversationSession> {
+        let context = format!(
+            "Use the following interview materials as your only codebase context. Do not inspect the repository directly.\n\n---\n\n{materials}"
+        );
+        let mut session = ConversationSession::new_with_session_id(
+            AgentKind::ProgrammerInterview,
+            session_id,
+            vec![
+                serde_json::json!({"role": "system", "content": AgentKind::ProgrammerInterview.system_prompt()}),
+                serde_json::json!({"role": "user", "content": context}),
+                serde_json::json!({"role": "assistant", "content": "Understood. I will interview the programmer using only these materials."}),
+            ],
+            Vec::new(),
+            &self.transcript_dir,
+        )?;
+        session.append_user_prompt(initial_prompt);
         session.save()?;
         Ok(session)
     }
 
     pub fn run_session_turn_with_events(
         &self,
+        agent_kind: AgentKind,
         session: &mut ConversationSession,
         event_sink: Option<RuntimeEventSink>,
     ) -> Result<String> {
-        let answer = self
-            .runtime
-            .run_session_turn_with_events(session, event_sink)?;
+        let runtime = match agent_kind {
+            AgentKind::InterviewMaterials => &self.materials_runtime,
+            AgentKind::ProgrammerInterview => &self.interviewer_runtime,
+        };
+        let answer = runtime.run_session_turn_with_events(session, event_sink)?;
         session.save()?;
         Ok(answer)
     }
 
-    pub fn load_session(&self, session_id: &str) -> Result<ConversationSession> {
-        let path = self.session_path(session_id);
+    pub fn load_session(
+        &self,
+        agent_kind: AgentKind,
+        session_id: &str,
+    ) -> Result<ConversationSession> {
+        let path = self.session_path(agent_kind, session_id);
+        if !path.exists() && agent_kind == AgentKind::InterviewMaterials {
+            let legacy_path = self.legacy_session_path(session_id);
+            if legacy_path.exists() {
+                return ConversationSession::load(legacy_path);
+            }
+        }
         ConversationSession::load(path)
     }
 
-    pub fn load_latest_session(&self) -> Result<Option<ConversationSession>> {
+    pub fn load_latest_session(
+        &self,
+        agent_kind: AgentKind,
+    ) -> Result<Option<ConversationSession>> {
         let latest = self
-            .list_session_snapshots()?
+            .list_session_snapshots(agent_kind)?
             .into_iter()
             .next()
             .map(|snapshot| snapshot.session_id);
         match latest {
-            Some(session_id) => self.load_session(&session_id).map(Some),
+            Some(session_id) => self.load_session(agent_kind, &session_id).map(Some),
             None => Ok(None),
         }
     }
 
-    pub fn list_session_snapshots(&self) -> Result<Vec<ConversationSessionSnapshot>> {
-        let sessions_dir = self.sessions_dir();
-        if !sessions_dir.exists() {
-            return Ok(Vec::new());
-        }
-
+    pub fn list_session_snapshots(
+        &self,
+        agent_kind: AgentKind,
+    ) -> Result<Vec<ConversationSessionSnapshot>> {
         let mut snapshots = Vec::new();
-        for entry in fs::read_dir(&sessions_dir)
-            .with_context(|| format!("failed to read sessions dir: {}", sessions_dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        for sessions_dir in self.session_dirs(agent_kind) {
+            if !sessions_dir.exists() {
                 continue;
             }
-            let session = ConversationSession::load(&path)?;
-            snapshots.push(session.snapshot().clone());
+
+            for entry in fs::read_dir(&sessions_dir).with_context(|| {
+                format!("failed to read sessions dir: {}", sessions_dir.display())
+            })? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let session = ConversationSession::load(&path)?;
+                if session.snapshot().agent_kind == agent_kind {
+                    snapshots.push(session.snapshot().clone());
+                }
+            }
         }
 
         snapshots.sort_by(|left, right| {
@@ -153,15 +219,57 @@ impl AskApp {
         Ok(snapshots)
     }
 
-    pub fn live_ui_snapshot_path(&self) -> PathBuf {
-        Path::new(&self.transcript_dir).join("live_ui_snapshot.json")
+    pub fn live_ui_snapshot_path(&self, agent_kind: AgentKind) -> PathBuf {
+        self.agent_dir(agent_kind).join("live_ui_snapshot.json")
     }
 
-    fn sessions_dir(&self) -> PathBuf {
-        Path::new(&self.transcript_dir).join("sessions")
+    pub fn workflow_snapshot_path(&self) -> PathBuf {
+        Path::new(&self.transcript_dir).join("workflow_snapshot.json")
     }
 
-    fn session_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir().join(format!("{session_id}.json"))
+    pub fn latest_materials_path(&self) -> PathBuf {
+        self.agent_dir(AgentKind::InterviewMaterials)
+            .join("latest_materials.md")
+    }
+
+    pub fn session_materials_path(&self, session_id: &str) -> PathBuf {
+        self.agent_dir(AgentKind::InterviewMaterials)
+            .join("materials")
+            .join(format!("{session_id}.md"))
+    }
+
+    pub fn latest_report_path(&self) -> PathBuf {
+        self.agent_dir(AgentKind::ProgrammerInterview)
+            .join("latest_evaluation_report.md")
+    }
+
+    pub fn session_report_path(&self, session_id: &str) -> PathBuf {
+        self.agent_dir(AgentKind::ProgrammerInterview)
+            .join("reports")
+            .join(format!("{session_id}.md"))
+    }
+
+    fn agent_dir(&self, agent_kind: AgentKind) -> PathBuf {
+        Path::new(&self.transcript_dir).join(agent_kind.as_str())
+    }
+
+    fn session_dirs(&self, agent_kind: AgentKind) -> Vec<PathBuf> {
+        let mut dirs = vec![self.agent_dir(agent_kind).join("sessions")];
+        if agent_kind == AgentKind::InterviewMaterials {
+            dirs.push(Path::new(&self.transcript_dir).join("sessions"));
+        }
+        dirs
+    }
+
+    fn session_path(&self, agent_kind: AgentKind, session_id: &str) -> PathBuf {
+        self.agent_dir(agent_kind)
+            .join("sessions")
+            .join(format!("{session_id}.json"))
+    }
+
+    fn legacy_session_path(&self, session_id: &str) -> PathBuf {
+        Path::new(&self.transcript_dir)
+            .join("sessions")
+            .join(format!("{session_id}.json"))
     }
 }
