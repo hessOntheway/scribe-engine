@@ -457,8 +457,7 @@ h4 {
 .pending-card {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  justify-content: center;
   background: rgba(12, 18, 34, 0.95);
 }
 

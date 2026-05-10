@@ -26,6 +26,9 @@ const state = {
   status: "idle",
   lastError: "",
   isRunning: false,
+  eventSource: null,
+  transportStatus: "disconnected",
+  transportLabel: "HTTP",
   reportText: "",
 };
 
@@ -65,6 +68,7 @@ bootstrap();
 async function bootstrap() {
   bindEvents();
   await Promise.all([loadSessions(), loadLiveSnapshot()]);
+  connectEvents();
   render();
 }
 
@@ -82,6 +86,98 @@ function bindEvents() {
       onSend();
     }
   });
+}
+
+function connectEvents() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+
+  const source = new EventSource(`/api/agents/${state.activeAgent}/events`);
+  state.eventSource = source;
+  state.transportStatus = "disconnected";
+  state.transportLabel = "SSE connecting";
+
+  source.onopen = () => {
+    state.transportStatus = "connected";
+    state.transportLabel = "SSE";
+    render();
+  };
+
+  source.onerror = () => {
+    state.transportStatus = "disconnected";
+    state.transportLabel = "SSE reconnecting";
+    render();
+  };
+
+  for (const eventType of ["snapshot", "turn_started", "message_added", "turn_finished", "turn_failed", "workflow_updated"]) {
+    source.addEventListener(eventType, handleLiveEvent);
+  }
+}
+
+function handleLiveEvent(event) {
+  let payload;
+  try {
+    payload = JSON.parse(event.data);
+  } catch (error) {
+    state.lastError = `Failed to parse live event: ${error instanceof Error ? error.message : String(error)}`;
+    render();
+    return;
+  }
+
+  if (payload.agent_kind && payload.agent_kind !== state.activeAgent) {
+    return;
+  }
+
+  applyLiveEvent(payload);
+  render();
+}
+
+function applyLiveEvent(payload) {
+  if (payload.workflow) {
+    state.workflow = payload.workflow;
+  }
+
+  if (payload.snapshot) {
+    applySnapshot(payload.snapshot);
+  }
+
+  if (payload.response) {
+    applySubmitResponse(payload.response);
+  }
+
+  if (payload.message) {
+    mergeMessages([payload.message]);
+    state.status = "thinking";
+    state.isRunning = true;
+  }
+
+  if (payload.type === "turn_finished") {
+    state.isRunning = false;
+    state.status = payload.response?.status || "waiting_for_input";
+    state.lastError = payload.response?.last_error || "";
+    if (payload.workflow?.interview_status === "completed") {
+      onViewReport();
+    }
+    refreshAfterTurn();
+  }
+
+  if (payload.type === "turn_failed") {
+    state.isRunning = false;
+    state.status = "error";
+    state.lastError = payload.error || payload.response?.last_error || "Agent turn failed";
+    refreshAfterTurn();
+  }
+}
+
+async function refreshAfterTurn() {
+  try {
+    await Promise.all([loadSessions(), refreshWorkflow()]);
+  } catch (error) {
+    state.lastError = error instanceof Error ? error.message : String(error);
+  }
+  render();
 }
 
 async function loadLiveSnapshot() {
@@ -117,6 +213,7 @@ async function onSend() {
   state.status = "running";
   render();
 
+  let accepted = false;
   try {
     const response = await requestJson(`/api/agents/${state.activeAgent}/messages`, {
       method: "POST",
@@ -124,25 +221,17 @@ async function onSend() {
     });
 
     nodes.promptInput.value = "";
-    state.messages.push(...(response.new_messages || []));
-    state.snapshot = {
-      agent_kind: response.agent_kind || state.activeAgent,
-      title: response.title || state.snapshot?.title || "Live conversation",
-      session_id: response.session_id || null,
-      status: response.status || "waiting_for_input",
-      last_error: response.last_error || null,
-      messages: state.messages,
-    };
-    state.snapshots[state.activeAgent] = state.snapshot;
-    state.status = response.status || "waiting_for_input";
-    state.lastError = response.last_error || "";
+    accepted = true;
+    applySubmitResponse(response);
     await loadSessions();
     await refreshWorkflow();
   } catch (error) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
   } finally {
-    state.isRunning = false;
+    if (!accepted) {
+      state.isRunning = false;
+    }
     render();
   }
 }
@@ -186,6 +275,7 @@ async function switchAgent(agentKind) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
   }
+  connectEvents();
   render();
 }
 
@@ -196,17 +286,22 @@ async function onStartInterview() {
   state.isRunning = true;
   state.lastError = "";
   render();
+  let accepted = false;
   try {
     const snapshot = await requestJson("/api/interview/start", { method: "POST" });
     state.activeAgent = "programmer_interview";
     applySnapshot(snapshot);
+    accepted = true;
+    connectEvents();
     await refreshWorkflow();
     await loadSessions();
   } catch (error) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
   } finally {
-    state.isRunning = false;
+    if (!accepted) {
+      state.isRunning = false;
+    }
     render();
   }
 }
@@ -246,27 +341,21 @@ async function onFinishInterview() {
   state.isRunning = true;
   state.lastError = "";
   render();
+  let accepted = false;
   try {
     const response = await requestJson("/api/interview/finish", { method: "POST" });
     state.activeAgent = "programmer_interview";
-    state.messages.push(...(response.new_messages || []));
-    state.snapshot = {
-      agent_kind: response.agent_kind || "programmer_interview",
-      title: response.title || state.snapshot?.title || "Programmer interview agent",
-      session_id: response.session_id || null,
-      status: response.status || "waiting_for_input",
-      last_error: response.last_error || null,
-      messages: state.messages,
-    };
-    state.snapshots[state.activeAgent] = state.snapshot;
+    accepted = true;
+    applySubmitResponse(response);
     await refreshWorkflow();
     await loadSessions();
-    await onViewReport();
   } catch (error) {
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
   } finally {
-    state.isRunning = false;
+    if (!accepted) {
+      state.isRunning = false;
+    }
     render();
   }
 }
@@ -292,6 +381,45 @@ function applySnapshot(snapshot) {
   state.snapshots[state.activeAgent] = state.snapshot;
   state.status = snapshot.status || "idle";
   state.lastError = snapshot.last_error || "";
+  state.isRunning = state.status === "thinking";
+}
+
+function applySubmitResponse(response) {
+  mergeMessages(response.new_messages || []);
+  state.snapshot = {
+    agent_kind: response.agent_kind || state.activeAgent,
+    title: response.title || state.snapshot?.title || "Live conversation",
+    session_id: response.session_id || null,
+    status: response.status || "waiting_for_input",
+    last_error: response.last_error || null,
+    messages: state.messages,
+  };
+  state.activeAgent = state.snapshot.agent_kind || state.activeAgent;
+  state.snapshots[state.activeAgent] = state.snapshot;
+  state.status = response.status || "waiting_for_input";
+  state.lastError = response.last_error || "";
+  state.isRunning = state.status === "thinking";
+}
+
+function mergeMessages(messages) {
+  if (!messages || messages.length === 0) {
+    return;
+  }
+
+  const byId = new Map(state.messages.map((message, index) => [message.id, index]));
+  for (const message of messages) {
+    if (!message?.id) {
+      state.messages.push(message);
+      continue;
+    }
+    const existingIndex = byId.get(message.id);
+    if (existingIndex === undefined) {
+      byId.set(message.id, state.messages.length);
+      state.messages.push(message);
+    } else {
+      state.messages[existingIndex] = message;
+    }
+  }
 }
 
 function render() {
@@ -303,6 +431,7 @@ function render() {
 
 function renderHeaderState() {
   const isInterview = state.activeAgent === "programmer_interview";
+  const isBusy = state.isRunning || state.status === "thinking";
   nodes.agentEyebrow.textContent = isInterview ? "Programmer Interview" : "Interview Materials";
   nodes.conversationTitle.textContent = state.snapshot?.title || agentTitle(state.activeAgent);
   nodes.activeAgentMeta.textContent = isInterview ? "Interview" : "Materials";
@@ -317,16 +446,16 @@ function renderHeaderState() {
   nodes.interviewStatus.textContent = formatInterviewStatus(state.workflow?.interview_status || "not_started");
   nodes.interviewPhase.textContent = state.workflow?.interview_phase || "INIT";
 
-  setChip(nodes.connectionStatus, "connected", "HTTP");
-  setChip(nodes.runStatus, state.isRunning ? "thinking" : state.status, formatStatus(state.isRunning ? "running" : state.status));
+  setChip(nodes.connectionStatus, state.transportStatus, state.transportLabel);
+  setChip(nodes.runStatus, isBusy ? "thinking" : state.status, formatStatus(isBusy ? "running" : state.status));
   nodes.headerStatus.textContent = describeStatus();
 
-  nodes.sendButton.disabled = state.isRunning;
-  nodes.promptInput.disabled = state.isRunning;
-  nodes.newSessionButton.disabled = state.isRunning;
-  nodes.startInterviewButton.disabled = state.isRunning || !state.workflow?.materials?.exists;
-  nodes.finishInterviewButton.disabled = state.isRunning || state.workflow?.interview_status !== "in_progress";
-  nodes.viewReportButton.disabled = state.isRunning || !state.workflow?.report;
+  nodes.sendButton.disabled = isBusy;
+  nodes.promptInput.disabled = isBusy;
+  nodes.newSessionButton.disabled = isBusy;
+  nodes.startInterviewButton.disabled = isBusy || !state.workflow?.materials?.exists;
+  nodes.finishInterviewButton.disabled = isBusy || state.workflow?.interview_status !== "in_progress";
+  nodes.viewReportButton.disabled = isBusy || !state.workflow?.report;
   nodes.materialsAgentButton.classList.toggle("active", !isInterview);
   nodes.interviewAgentButton.classList.toggle("active", isInterview);
   nodes.composerLabel.textContent = isInterview ? "Answer the interviewer" : "Message the materials agent";
@@ -345,7 +474,7 @@ function renderSessions() {
   const draftCard = document.createElement("button");
   draftCard.type = "button";
   draftCard.className = `session-card ${draftActive ? "active" : ""}`;
-  draftCard.disabled = state.isRunning;
+  draftCard.disabled = state.isRunning || state.status === "thinking";
   draftCard.addEventListener("click", onNewSession);
   draftCard.innerHTML = `
     <div class="session-card-head">
@@ -360,7 +489,7 @@ function renderSessions() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-card ${session.is_active ? "active" : ""}`;
-    button.disabled = state.isRunning;
+    button.disabled = state.isRunning || state.status === "thinking";
     button.addEventListener("click", () => onSelectSession(session.session_id));
 
     const turnCount = session.prompt_count || 0;
@@ -410,7 +539,7 @@ function renderMessages() {
     }
   }
 
-  if (state.isRunning) {
+  if (state.isRunning || state.status === "thinking") {
     container.append(renderPendingCard());
   }
 
@@ -585,21 +714,13 @@ function appendBlock(body, block) {
 function renderPendingCard() {
   const wrapper = document.createElement("section");
   wrapper.className = "pending-card";
-
-  const text = document.createElement("div");
-  const heading = document.createElement("h4");
-  heading.textContent = "Agent is working";
-  const detail = document.createElement("p");
-  detail.className = "subtle";
-  detail.textContent = "服务端正在同步执行这一轮，完成后会把新增消息一次性返回到这里。";
-
-  text.append(heading, detail);
+  wrapper.setAttribute("aria-label", "Agent is working");
 
   const dots = document.createElement("div");
   dots.className = "pending-dots";
   dots.innerHTML = "<span></span><span></span><span></span>";
 
-  wrapper.append(text, dots);
+  wrapper.append(dots);
   return wrapper;
 }
 
@@ -717,7 +838,7 @@ async function renderMermaidInto(host, source) {
   } catch (error) {
     const fallback = document.createElement("p");
     fallback.className = "error-text";
-    fallback.textContent = `Mermaid 渲染失败：${error instanceof Error ? error.message : String(error)}`;
+    fallback.textContent = `Mermaid render failed: ${error instanceof Error ? error.message : String(error)}`;
     host.replaceChildren(fallback);
   }
 }
@@ -805,8 +926,8 @@ function formatStatus(status) {
 }
 
 function describeStatus() {
-  if (state.isRunning) {
-    return "Agent is processing the current turn on the server";
+  if (state.isRunning || state.status === "thinking") {
+    return "Agent is processing the current turn and streaming updates";
   }
 
   const labels = {

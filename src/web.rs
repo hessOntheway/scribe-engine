@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,12 +9,16 @@ use crate::agents::AgentKind;
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::broadcast;
 use tokio::task;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::ask::AskApp;
@@ -133,6 +138,84 @@ struct LiveSubmitResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct LiveEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    agent_kind: AgentKind,
+    snapshot: Option<LiveSnapshot>,
+    response: Option<LiveSubmitResponse>,
+    message: Option<UiMessage>,
+    workflow: Option<WorkflowSnapshot>,
+    error: Option<String>,
+}
+
+impl LiveEvent {
+    fn snapshot(
+        agent_kind: AgentKind,
+        snapshot: LiveSnapshot,
+        workflow: Option<WorkflowSnapshot>,
+    ) -> Self {
+        Self {
+            event_type: "snapshot".to_string(),
+            agent_kind,
+            snapshot: Some(snapshot),
+            response: None,
+            message: None,
+            workflow,
+            error: None,
+        }
+    }
+
+    fn turn_started(response: LiveSubmitResponse, workflow: Option<WorkflowSnapshot>) -> Self {
+        Self {
+            event_type: "turn_started".to_string(),
+            agent_kind: response.agent_kind,
+            snapshot: None,
+            response: Some(response),
+            message: None,
+            workflow,
+            error: None,
+        }
+    }
+
+    fn message_added(agent_kind: AgentKind, message: UiMessage) -> Self {
+        Self {
+            event_type: "message_added".to_string(),
+            agent_kind,
+            snapshot: None,
+            response: None,
+            message: Some(message),
+            workflow: None,
+            error: None,
+        }
+    }
+
+    fn turn_finished(response: LiveSubmitResponse, workflow: Option<WorkflowSnapshot>) -> Self {
+        Self {
+            event_type: "turn_finished".to_string(),
+            agent_kind: response.agent_kind,
+            snapshot: None,
+            response: Some(response),
+            message: None,
+            workflow,
+            error: None,
+        }
+    }
+
+    fn turn_failed(response: LiveSubmitResponse, error: String) -> Self {
+        Self {
+            event_type: "turn_failed".to_string(),
+            agent_kind: response.agent_kind,
+            snapshot: None,
+            response: Some(response),
+            message: None,
+            workflow: None,
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct SessionListItem {
     session_id: String,
     title: String,
@@ -178,6 +261,16 @@ struct PendingUiMessage {
     tool_output: Option<String>,
 }
 
+type TurnCompletionHandler =
+    Arc<dyn Fn(&LiveSubmitResponse) -> Option<WorkflowSnapshot> + Send + Sync>;
+
+struct StartedTurn {
+    session: ConversationSession,
+    session_id: String,
+    turn_id: u64,
+    response: LiveSubmitResponse,
+}
+
 struct LiveConversationInner {
     session: Option<ConversationSession>,
     title: String,
@@ -193,6 +286,7 @@ struct LiveConversationManager {
     ask_app: AskApp,
     snapshot_path: PathBuf,
     inner: Arc<Mutex<LiveConversationInner>>,
+    event_tx: broadcast::Sender<LiveEvent>,
 }
 
 impl LiveConversationManager {
@@ -252,6 +346,7 @@ impl LiveConversationManager {
                 status,
                 last_error,
             })),
+            event_tx: broadcast::channel(512).0,
         };
 
         manager.persist_snapshot()?;
@@ -271,15 +366,32 @@ impl LiveConversationManager {
         save_persisted_snapshot(&self.snapshot_path, &snapshot)
     }
 
-    async fn submit_user_message(
+    fn subscribe(&self) -> broadcast::Receiver<LiveEvent> {
+        self.event_tx.subscribe()
+    }
+
+    fn broadcast(&self, event: LiveEvent) {
+        let _ = self.event_tx.send(event);
+    }
+
+    fn submit_user_message(
         self: &Arc<Self>,
         prompt: String,
+        on_complete: Option<TurnCompletionHandler>,
     ) -> Result<LiveSubmitResponse, AppError> {
         let turn_id = TURN_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let started = self.start_turn(prompt, turn_id)?;
+        let response = started.response.clone();
+        self.broadcast(LiveEvent::turn_started(response.clone(), None));
+
         let manager = Arc::clone(self);
-        task::spawn_blocking(move || manager.run_turn_blocking(prompt, turn_id))
-            .await
-            .map_err(|err| AppError::internal(anyhow!(err.to_string())))?
+        task::spawn_blocking(move || {
+            if let Err(error) = manager.run_turn_background(started, on_complete) {
+                eprintln!("error: failed to complete agent turn: {}", error.message);
+            }
+        });
+
+        Ok(response)
     }
 
     fn is_busy(&self) -> Result<bool, AppError> {
@@ -315,6 +427,7 @@ impl LiveConversationManager {
                 };
                 save_persisted_snapshot(&self.snapshot_path, &persisted)
                     .map_err(AppError::internal)?;
+                self.broadcast(LiveEvent::snapshot(self.agent_kind, persisted, None));
                 return Ok(None);
             }
         };
@@ -344,6 +457,11 @@ impl LiveConversationManager {
         };
 
         save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+        self.broadcast(LiveEvent::snapshot(
+            self.agent_kind,
+            persisted.clone(),
+            None,
+        ));
         Ok(Some(persisted))
     }
 
@@ -384,16 +502,17 @@ impl LiveConversationManager {
         };
 
         save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+        self.broadcast(LiveEvent::snapshot(
+            self.agent_kind,
+            persisted.clone(),
+            None,
+        ));
         Ok(persisted)
     }
-    fn run_turn_blocking(
-        self: Arc<Self>,
-        prompt: String,
-        turn_id: u64,
-    ) -> Result<LiveSubmitResponse, AppError> {
+    fn start_turn(&self, prompt: String, turn_id: u64) -> Result<StartedTurn, AppError> {
         let mut new_messages = Vec::new();
 
-        let (mut session, session_id) = {
+        let (session, session_id) = {
             let mut inner = self.inner.lock().map_err(|_| {
                 AppError::internal(anyhow!("failed to lock live conversation state"))
             })?;
@@ -447,71 +566,81 @@ impl LiveConversationManager {
             (session, snapshot.session_id)
         };
 
-        let pending_messages = Arc::new(Mutex::new(Vec::<PendingUiMessage>::new()));
-        let collector = Arc::clone(&pending_messages);
+        let total_message_count = self
+            .inner
+            .lock()
+            .map(|inner| inner.ui_messages.len())
+            .unwrap_or(new_messages.len());
+
+        Ok(StartedTurn {
+            session,
+            session_id: session_id.clone(),
+            turn_id,
+            response: LiveSubmitResponse {
+                agent_kind: self.agent_kind,
+                title: self
+                    .snapshot()
+                    .map(|snapshot| snapshot.title)
+                    .unwrap_or_else(|_| self.agent_kind.title().to_string()),
+                session_id: Some(session_id.clone()),
+                status: LiveStatus::Thinking.as_str().to_string(),
+                last_error: None,
+                new_messages,
+                total_message_count,
+            },
+        })
+    }
+
+    fn run_turn_background(
+        self: Arc<Self>,
+        mut started: StartedTurn,
+        on_complete: Option<TurnCompletionHandler>,
+    ) -> Result<(), AppError> {
+        let event_manager = Arc::clone(&self);
+        let event_session_id = started.session_id.clone();
+        let event_turn_id = started.turn_id;
         let observer: RuntimeEventSink = Arc::new(move |event| {
             if let Some(message) = pending_message_from_event(event) {
-                if let Ok(mut messages) = collector.lock() {
-                    messages.push(message);
+                if let Err(error) =
+                    event_manager.append_runtime_message(&event_session_id, event_turn_id, message)
+                {
+                    eprintln!(
+                        "error: failed to append live runtime event: {}",
+                        error.message
+                    );
                 }
             }
         });
 
         let runtime_result = self.ask_app.run_session_turn_with_events(
             self.agent_kind,
-            &mut session,
+            &mut started.session,
             Some(observer),
         );
 
-        let collected_messages = pending_messages
-            .lock()
-            .map(|messages| messages.clone())
-            .unwrap_or_default();
-
         if let Err(error) = runtime_result {
-            let _ = session.save();
+            let _ = started.session.save();
             let error_text = error.to_string();
-            return self.finish_turn(
-                session,
-                session_id,
-                turn_id,
-                new_messages,
-                collected_messages,
-                Some(error_text),
-            );
+            self.finish_turn(started, Some(error_text), None)?;
+            return Ok(());
         }
 
-        self.finish_turn(
-            session,
-            session_id,
-            turn_id,
-            new_messages,
-            collected_messages,
-            None,
-        )
+        self.finish_turn(started, None, on_complete)?;
+        Ok(())
     }
 
-    fn finish_turn(
+    fn append_runtime_message(
         &self,
-        session: ConversationSession,
-        session_id: String,
+        session_id: &str,
         turn_id: u64,
-        mut new_messages: Vec<UiMessage>,
-        collected_messages: Vec<PendingUiMessage>,
-        error_text: Option<String>,
-    ) -> Result<LiveSubmitResponse, AppError> {
-        let snapshot = session.snapshot().clone();
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| AppError::internal(anyhow!("failed to lock live conversation state")))?;
-
-        inner.title = summary_title(&snapshot);
-        inner.session_id = Some(snapshot.session_id.clone());
-
-        for pending in collected_messages {
+        pending: PendingUiMessage,
+    ) -> Result<UiMessage, AppError> {
+        let ui_message = {
+            let mut inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
             let ui_message = base_ui_message(
-                &session_id,
+                session_id,
                 inner.next_message_index,
                 &pending.role,
                 &pending.kind,
@@ -524,30 +653,70 @@ impl LiveConversationManager {
             );
             inner.next_message_index += 1;
             inner.ui_messages.push(ui_message.clone());
-            new_messages.push(ui_message);
-        }
+            let persisted = self.snapshot_from_inner(&inner);
+            save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+            ui_message
+        };
 
-        inner.session = Some(session);
-        if let Some(error_text) = error_text.clone() {
-            inner.status = LiveStatus::Error;
-            inner.last_error = Some(error_text);
+        self.broadcast(LiveEvent::message_added(
+            self.agent_kind,
+            ui_message.clone(),
+        ));
+        Ok(ui_message)
+    }
+
+    fn finish_turn(
+        &self,
+        started: StartedTurn,
+        error_text: Option<String>,
+        on_complete: Option<TurnCompletionHandler>,
+    ) -> Result<LiveSubmitResponse, AppError> {
+        let snapshot = started.session.snapshot().clone();
+        let turn_key = format!("{}-turn-{}", started.session_id, started.turn_id);
+        let response = {
+            let mut inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+
+            inner.title = summary_title(&snapshot);
+            inner.session_id = Some(snapshot.session_id.clone());
+            inner.session = Some(started.session);
+            if let Some(error_text) = error_text.clone() {
+                inner.status = LiveStatus::Error;
+                inner.last_error = Some(error_text);
+            } else {
+                inner.status = LiveStatus::WaitingForInput;
+                inner.last_error = None;
+            }
+
+            let persisted = self.snapshot_from_inner(&inner);
+            save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+            let turn_messages = inner
+                .ui_messages
+                .iter()
+                .filter(|message| message.turn_id == turn_key)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            LiveSubmitResponse {
+                agent_kind: self.agent_kind,
+                title: persisted.title,
+                session_id: persisted.session_id,
+                status: persisted.status,
+                last_error: persisted.last_error,
+                new_messages: turn_messages,
+                total_message_count: inner.ui_messages.len(),
+            }
+        };
+
+        if let Some(error_text) = error_text {
+            self.broadcast(LiveEvent::turn_failed(response.clone(), error_text));
         } else {
-            inner.status = LiveStatus::WaitingForInput;
-            inner.last_error = None;
+            let workflow = on_complete.and_then(|callback| callback(&response));
+            self.broadcast(LiveEvent::turn_finished(response.clone(), workflow));
         }
 
-        let persisted = self.snapshot_from_inner(&inner);
-        save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
-
-        Ok(LiveSubmitResponse {
-            agent_kind: self.agent_kind,
-            title: persisted.title,
-            session_id: persisted.session_id,
-            status: persisted.status,
-            last_error: persisted.last_error,
-            new_messages,
-            total_message_count: inner.ui_messages.len(),
-        })
+        Ok(response)
     }
 
     fn snapshot_from_inner(&self, inner: &LiveConversationInner) -> LiveSnapshot {
@@ -581,7 +750,9 @@ impl LiveConversationManager {
         inner.status = LiveStatus::WaitingForInput;
         inner.last_error = None;
         let persisted = self.snapshot_from_inner(&inner);
-        save_persisted_snapshot(&self.snapshot_path, &persisted)
+        save_persisted_snapshot(&self.snapshot_path, &persisted)?;
+        self.broadcast(LiveEvent::snapshot(self.agent_kind, persisted, None));
+        Ok(())
     }
 }
 
@@ -797,34 +968,50 @@ impl WorkflowManager {
         Ok(materials)
     }
 
-    async fn submit_user_message(
-        self: &Arc<Self>,
-        agent_kind: AgentKind,
-        prompt: String,
-    ) -> Result<LiveSubmitResponse, AppError> {
-        if agent_kind == AgentKind::ProgrammerInterview
-            && self
-                .interview_live
-                .snapshot()
-                .map_err(AppError::internal)?
-                .session_id
-                .is_none()
-        {
-            return Err(AppError::conflict(
-                "start the interview before sending candidate answers",
-            ));
-        }
+    fn completion_handler(self: &Arc<Self>, agent_kind: AgentKind) -> TurnCompletionHandler {
+        let workflow = Arc::clone(self);
+        Arc::new(
+            move |response| match workflow.complete_agent_turn(agent_kind, response) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    eprintln!("error: failed to complete workflow turn: {}", error.message);
+                    None
+                }
+            },
+        )
+    }
 
-        let response = self
-            .live_for(agent_kind)
-            .submit_user_message(prompt)
-            .await?;
+    fn finish_interview_completion_handler(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> TurnCompletionHandler {
+        let workflow = Arc::clone(self);
+        Arc::new(move |response| {
+            match workflow.write_report_and_complete_interview(&session_id, response) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    eprintln!(
+                        "error: failed to write interview report after completion: {}",
+                        error.message
+                    );
+                    None
+                }
+            }
+        })
+    }
+
+    fn complete_agent_turn(
+        &self,
+        agent_kind: AgentKind,
+        response: &LiveSubmitResponse,
+    ) -> Result<WorkflowSnapshot, AppError> {
         if agent_kind == AgentKind::InterviewMaterials {
             if let Some(session_id) = response.session_id.as_deref() {
                 self.copy_latest_materials_to_session(session_id)
                     .map_err(AppError::internal)?;
             }
         }
+
         {
             let mut inner = self
                 .inner
@@ -837,91 +1024,18 @@ impl WorkflowManager {
             }
         }
         self.persist_workflow().map_err(AppError::internal)?;
-        Ok(response)
+        self.snapshot().map_err(AppError::internal)
     }
 
-    async fn start_interview(self: &Arc<Self>) -> Result<LiveSnapshot, AppError> {
-        let session_id = self
-            .materials_live
-            .snapshot()
-            .map_err(AppError::internal)?
-            .session_id
-            .ok_or_else(|| {
-                AppError::conflict("create or select a session before starting interview")
-            })?;
-        let materials = self.read_materials_for_session(&session_id)?;
-
-        if let Ok(session) = self
-            .ask_app
-            .load_session(AgentKind::ProgrammerInterview, &session_id)
-        {
-            self.interview_live
-                .replace_session(session)
-                .map_err(AppError::internal)?;
-        } else {
-            let session = self
-                .ask_app
-                .new_seeded_interview_session(
-                    session_id.clone(),
-                    &materials,
-                    "Start the interview. Briefly introduce the process, then ask the first architecture question.".to_string(),
-                )
-                .map_err(AppError::internal)?;
-            self.interview_live
-                .replace_session(session)
-                .map_err(AppError::internal)?;
-
-            let _response = self
-                .interview_live
-                .submit_user_message("Begin now.".to_string())
-                .await?;
-        }
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| AppError::internal(anyhow!("failed to lock workflow state")))?;
-            inner.active_agent = AgentKind::ProgrammerInterview;
-            inner.interview_status = InterviewStatus::InProgress;
-            inner.interview_phase = "INTRODUCTION".to_string();
-            inner.materials_session_id = Some(session_id.clone());
-            inner.interview_session_id = Some(session_id.clone());
-            inner.materials = materials_meta_for_session(&self.ask_app, Some(&session_id));
-            inner.report = report_meta_for_session(&self.ask_app, Some(&session_id));
-        }
-        self.persist_workflow().map_err(AppError::internal)?;
-
-        self.interview_live.snapshot().map_err(AppError::internal)
-    }
-
-    async fn finish_interview(self: &Arc<Self>) -> Result<LiveSubmitResponse, AppError> {
-        if self
-            .interview_live
-            .snapshot()
-            .map_err(AppError::internal)?
-            .session_id
-            .is_none()
-        {
-            return Err(AppError::conflict("no interview session is in progress"));
-        }
-        let session_id = self
-            .interview_live
-            .snapshot()
-            .map_err(AppError::internal)?
-            .session_id
-            .ok_or_else(|| AppError::conflict("no interview session is in progress"))?;
-
-        let response = self
-            .interview_live
-            .submit_user_message(
-                "Finish the interview now and produce the final evaluation report in Markdown."
-                    .to_string(),
-            )
-            .await?;
+    fn write_report_and_complete_interview(
+        &self,
+        session_id: &str,
+        response: &LiveSubmitResponse,
+    ) -> Result<WorkflowSnapshot, AppError> {
         let report = latest_assistant_content(&response.new_messages)
             .unwrap_or_else(|| "No evaluation report was produced.".to_string());
         let report_path = self.ask_app.latest_report_path();
-        let session_report_path = self.ask_app.session_report_path(&session_id);
+        let session_report_path = self.ask_app.session_report_path(session_id);
         if let Some(parent) = session_report_path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| AppError::internal(anyhow!(err)))?;
         }
@@ -946,6 +1060,136 @@ impl WorkflowManager {
             });
         }
         self.persist_workflow().map_err(AppError::internal)?;
+        self.snapshot().map_err(AppError::internal)
+    }
+
+    fn submit_user_message(
+        self: &Arc<Self>,
+        agent_kind: AgentKind,
+        prompt: String,
+    ) -> Result<LiveSubmitResponse, AppError> {
+        if agent_kind == AgentKind::ProgrammerInterview
+            && self
+                .interview_live
+                .snapshot()
+                .map_err(AppError::internal)?
+                .session_id
+                .is_none()
+        {
+            return Err(AppError::conflict(
+                "start the interview before sending candidate answers",
+            ));
+        }
+
+        let response = self
+            .live_for(agent_kind)
+            .submit_user_message(prompt, Some(self.completion_handler(agent_kind)))?;
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| AppError::internal(anyhow!("failed to lock workflow state")))?;
+            inner.active_agent = agent_kind;
+            if agent_kind == AgentKind::ProgrammerInterview {
+                inner.interview_status = InterviewStatus::InProgress;
+                inner.interview_phase = "IN_PROGRESS".to_string();
+            }
+        }
+        self.persist_workflow().map_err(AppError::internal)?;
+        Ok(response)
+    }
+
+    fn start_interview(self: &Arc<Self>) -> Result<LiveSnapshot, AppError> {
+        let session_id = self
+            .materials_live
+            .snapshot()
+            .map_err(AppError::internal)?
+            .session_id
+            .ok_or_else(|| {
+                AppError::conflict("create or select a session before starting interview")
+            })?;
+        let materials = self.read_materials_for_session(&session_id)?;
+        let should_begin;
+
+        if let Ok(session) = self
+            .ask_app
+            .load_session(AgentKind::ProgrammerInterview, &session_id)
+        {
+            self.interview_live
+                .replace_session(session)
+                .map_err(AppError::internal)?;
+            should_begin = false;
+        } else {
+            let session = self
+                .ask_app
+                .new_seeded_interview_session(
+                    session_id.clone(),
+                    &materials,
+                    "Start the interview. Briefly introduce the process, then ask the first architecture question.".to_string(),
+                )
+                .map_err(AppError::internal)?;
+            self.interview_live
+                .replace_session(session)
+                .map_err(AppError::internal)?;
+            should_begin = true;
+        }
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| AppError::internal(anyhow!("failed to lock workflow state")))?;
+            inner.active_agent = AgentKind::ProgrammerInterview;
+            inner.interview_status = InterviewStatus::InProgress;
+            inner.interview_phase = "INTRODUCTION".to_string();
+            inner.materials_session_id = Some(session_id.clone());
+            inner.interview_session_id = Some(session_id.clone());
+            inner.materials = materials_meta_for_session(&self.ask_app, Some(&session_id));
+            inner.report = report_meta_for_session(&self.ask_app, Some(&session_id));
+        }
+        self.persist_workflow().map_err(AppError::internal)?;
+
+        if should_begin {
+            let _response = self.interview_live.submit_user_message(
+                "Begin now.".to_string(),
+                Some(self.completion_handler(AgentKind::ProgrammerInterview)),
+            )?;
+        }
+
+        self.interview_live.snapshot().map_err(AppError::internal)
+    }
+
+    fn finish_interview(self: &Arc<Self>) -> Result<LiveSubmitResponse, AppError> {
+        if self
+            .interview_live
+            .snapshot()
+            .map_err(AppError::internal)?
+            .session_id
+            .is_none()
+        {
+            return Err(AppError::conflict("no interview session is in progress"));
+        }
+        let session_id = self
+            .interview_live
+            .snapshot()
+            .map_err(AppError::internal)?
+            .session_id
+            .ok_or_else(|| AppError::conflict("no interview session is in progress"))?;
+
+        let response = self.interview_live.submit_user_message(
+            "Finish the interview now and produce the final evaluation report in Markdown."
+                .to_string(),
+            Some(self.finish_interview_completion_handler(session_id)),
+        )?;
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| AppError::internal(anyhow!("failed to lock workflow state")))?;
+            inner.active_agent = AgentKind::ProgrammerInterview;
+            inner.interview_status = InterviewStatus::InProgress;
+            inner.interview_phase = "REPORT".to_string();
+        }
+        self.persist_workflow().map_err(AppError::internal)?;
         Ok(response)
     }
 }
@@ -962,7 +1206,9 @@ pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
         .route("/api/live/session", post(select_live_session))
         .route("/api/live/session/new", post(post_new_live_session))
         .route("/api/live/messages", post(post_legacy_live_message))
+        .route("/api/live/events", get(get_legacy_live_events))
         .route("/api/agents/{agent_kind}/live", get(get_agent_live))
+        .route("/api/agents/{agent_kind}/events", get(get_agent_events))
         .route(
             "/api/agents/{agent_kind}/messages",
             post(post_agent_message),
@@ -1038,9 +1284,14 @@ async fn post_legacy_live_message(
     let prompt = non_empty_prompt(body.prompt)?;
     let response = state
         .workflow
-        .submit_user_message(AgentKind::InterviewMaterials, prompt)
-        .await?;
+        .submit_user_message(AgentKind::InterviewMaterials, prompt)?;
     Ok(Json(response))
+}
+
+async fn get_legacy_live_events(
+    State(state): State<WebState>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    live_events_sse(Arc::clone(&state.workflow), AgentKind::InterviewMaterials)
 }
 
 async fn get_agent_live(
@@ -1057,6 +1308,14 @@ async fn get_agent_live(
     ))
 }
 
+async fn get_agent_events(
+    State(state): State<WebState>,
+    AxumPath(agent_kind): AxumPath<String>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    let agent_kind = parse_agent_kind(&agent_kind)?;
+    live_events_sse(Arc::clone(&state.workflow), agent_kind)
+}
+
 async fn post_agent_message(
     State(state): State<WebState>,
     AxumPath(agent_kind): AxumPath<String>,
@@ -1064,24 +1323,21 @@ async fn post_agent_message(
 ) -> Result<Json<LiveSubmitResponse>, AppError> {
     let agent_kind = parse_agent_kind(&agent_kind)?;
     let prompt = non_empty_prompt(body.prompt)?;
-    let response = state
-        .workflow
-        .submit_user_message(agent_kind, prompt)
-        .await?;
+    let response = state.workflow.submit_user_message(agent_kind, prompt)?;
     Ok(Json(response))
 }
 
 async fn post_interview_start(
     State(state): State<WebState>,
 ) -> Result<Json<LiveSnapshot>, AppError> {
-    let response = state.workflow.start_interview().await?;
+    let response = state.workflow.start_interview()?;
     Ok(Json(response))
 }
 
 async fn post_interview_finish(
     State(state): State<WebState>,
 ) -> Result<Json<LiveSubmitResponse>, AppError> {
-    let response = state.workflow.finish_interview().await?;
+    let response = state.workflow.finish_interview()?;
     Ok(Json(response))
 }
 
@@ -1103,6 +1359,40 @@ async fn get_interview_report(State(state): State<WebState>) -> Result<String, A
             report_path.display()
         ))
     })
+}
+
+fn live_events_sse(
+    workflow: Arc<WorkflowManager>,
+    agent_kind: AgentKind,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static>, AppError> {
+    let live = workflow.live_for(agent_kind);
+    let snapshot = live.snapshot().map_err(AppError::internal)?;
+    let workflow_snapshot = workflow.snapshot().map_err(AppError::internal)?;
+    let initial = LiveEvent::snapshot(agent_kind, snapshot, Some(workflow_snapshot));
+    let receiver = live.subscribe();
+
+    let initial_stream = tokio_stream::iter(vec![live_event_to_sse(initial)]);
+    let update_stream = BroadcastStream::new(receiver).filter_map(|result| match result {
+        Ok(event) => Some(live_event_to_sse(event)),
+        Err(_) => None,
+    });
+
+    Ok(Sse::new(initial_stream.chain(update_stream)).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
+}
+
+fn live_event_to_sse(event: LiveEvent) -> Result<Event, Infallible> {
+    let event_type = event.event_type.clone();
+    let data = serde_json::to_string(&event).unwrap_or_else(|error| {
+        format!(
+            r#"{{"type":"serialization_error","error":"failed to serialize live event: {}"}}"#,
+            error
+        )
+    });
+    Ok(Event::default().event(event_type).data(data))
 }
 
 fn default_workflow_snapshot(ask_app: &AskApp) -> WorkflowSnapshot {
