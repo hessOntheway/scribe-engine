@@ -456,7 +456,9 @@ h4 {
 
 .pending-card {
   display: flex;
+  flex-direction: column;
   align-items: center;
+  gap: 12px;
   justify-content: center;
   background: rgba(12, 18, 34, 0.95);
 }
@@ -481,6 +483,64 @@ h4 {
 
 .pending-dots span:nth-child(3) {
   animation-delay: 0.3s;
+}
+
+.live-progress {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.live-progress-title {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.live-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.live-progress-item {
+  position: relative;
+  min-height: 28px;
+  padding: 7px 10px 7px 28px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: var(--radius-sm);
+  background: rgba(8, 12, 23, 0.48);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.live-progress-item::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.58);
+  transform: translateY(-50%);
+}
+
+.live-progress-item.current {
+  border-color: rgba(108, 182, 255, 0.28);
+  background: rgba(108, 182, 255, 0.1);
+  color: var(--text);
+}
+
+.live-progress-item.current::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(108, 182, 255, 0.12);
 }
 
 .trace-toggle {

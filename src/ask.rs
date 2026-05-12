@@ -223,6 +223,24 @@ impl AskApp {
         self.agent_dir(agent_kind).join("live_ui_snapshot.json")
     }
 
+    pub fn ui_session_snapshot_path(&self, agent_kind: AgentKind, session_id: &str) -> PathBuf {
+        self.agent_dir(agent_kind)
+            .join("ui_sessions")
+            .join(format!("{session_id}.json"))
+    }
+
+    pub fn trace_turn_path(
+        &self,
+        agent_kind: AgentKind,
+        session_id: &str,
+        turn_id: &str,
+    ) -> PathBuf {
+        self.agent_dir(agent_kind)
+            .join("traces")
+            .join(session_id)
+            .join(format!("{turn_id}.jsonl"))
+    }
+
     pub fn workflow_snapshot_path(&self) -> PathBuf {
         Path::new(&self.transcript_dir).join("workflow_snapshot.json")
     }

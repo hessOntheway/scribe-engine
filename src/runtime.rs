@@ -16,6 +16,11 @@ pub type RuntimeEventSink = Arc<dyn Fn(RuntimeEvent) + Send + Sync>;
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     AssistantMessage(Value),
+    Compaction {
+        removed_messages: usize,
+        estimated_tokens_before: usize,
+        transcript_path: Option<String>,
+    },
     ToolCall {
         tool_call_id: String,
         name: String,
@@ -122,6 +127,16 @@ impl AgentLoop {
                     "info: auto compact triggered, removed {} messages (estimated tokens: {}), transcript: {}",
                     event.removed_messages, event.estimated_tokens_before, transcript
                 );
+                if let Some(sink) = &event_sink {
+                    sink(RuntimeEvent::Compaction {
+                        removed_messages: event.removed_messages,
+                        estimated_tokens_before: event.estimated_tokens_before,
+                        transcript_path: event
+                            .transcript_path
+                            .as_ref()
+                            .map(|path| path.display().to_string()),
+                    });
+                }
             }
 
             let assistant = self.llm.create_chat_completion_with_audit_path(

@@ -30,6 +30,7 @@ const state = {
   transportStatus: "disconnected",
   transportLabel: "HTTP",
   reportText: "",
+  liveTrace: [],
 };
 
 const nodes = {
@@ -111,7 +112,7 @@ function connectEvents() {
     render();
   };
 
-  for (const eventType of ["snapshot", "turn_started", "message_added", "turn_finished", "turn_failed", "workflow_updated"]) {
+  for (const eventType of ["snapshot", "turn_started", "message_added", "trace_added", "turn_finished", "turn_failed", "workflow_updated"]) {
     source.addEventListener(eventType, handleLiveEvent);
   }
 }
@@ -147,7 +148,11 @@ function applyLiveEvent(payload) {
     applySubmitResponse(payload.response);
   }
 
-  if (payload.message) {
+  if (payload.message && payload.type === "trace_added") {
+    mergeLiveTrace([payload.message]);
+    state.status = "thinking";
+    state.isRunning = true;
+  } else if (payload.message) {
     mergeMessages([payload.message]);
     state.status = "thinking";
     state.isRunning = true;
@@ -155,6 +160,7 @@ function applyLiveEvent(payload) {
 
   if (payload.type === "turn_finished") {
     state.isRunning = false;
+    state.liveTrace = [];
     state.status = payload.response?.status || "waiting_for_input";
     state.lastError = payload.response?.last_error || "";
     if (payload.workflow?.interview_status === "completed") {
@@ -165,6 +171,7 @@ function applyLiveEvent(payload) {
 
   if (payload.type === "turn_failed") {
     state.isRunning = false;
+    state.liveTrace = [];
     state.status = "error";
     state.lastError = payload.error || payload.response?.last_error || "Agent turn failed";
     refreshAfterTurn();
@@ -378,6 +385,7 @@ function applySnapshot(snapshot) {
   state.snapshot = snapshot;
   state.activeAgent = snapshot.agent_kind || state.activeAgent;
   state.messages = [...(snapshot.messages || [])];
+  state.liveTrace = [];
   state.snapshots[state.activeAgent] = state.snapshot;
   state.status = snapshot.status || "idle";
   state.lastError = snapshot.last_error || "";
@@ -386,6 +394,9 @@ function applySnapshot(snapshot) {
 
 function applySubmitResponse(response) {
   mergeMessages(response.new_messages || []);
+  if (response.status === "thinking") {
+    state.liveTrace = [];
+  }
   state.snapshot = {
     agent_kind: response.agent_kind || state.activeAgent,
     title: response.title || state.snapshot?.title || "Live conversation",
@@ -418,6 +429,27 @@ function mergeMessages(messages) {
       state.messages.push(message);
     } else {
       state.messages[existingIndex] = message;
+    }
+  }
+}
+
+function mergeLiveTrace(messages) {
+  if (!messages || messages.length === 0) {
+    return;
+  }
+
+  const byId = new Map(state.liveTrace.map((message, index) => [message.id, index]));
+  for (const message of messages) {
+    if (!message?.id) {
+      state.liveTrace.push(message);
+      continue;
+    }
+    const existingIndex = byId.get(message.id);
+    if (existingIndex === undefined) {
+      byId.set(message.id, state.liveTrace.length);
+      state.liveTrace.push(message);
+    } else {
+      state.liveTrace[existingIndex] = message;
     }
   }
 }
@@ -540,7 +572,7 @@ function renderMessages() {
   }
 
   if (state.isRunning || state.status === "thinking") {
-    container.append(renderPendingCard());
+    container.append(renderPendingCard(state.liveTrace));
   }
 
   nodes.messageStream.append(container);
@@ -688,10 +720,6 @@ function renderAssistantTurn(group) {
     appendBlock(body, block);
   }
 
-  if (group.traces.length > 0) {
-    body.append(renderTracePanel(group.traces));
-  }
-
   return row;
 }
 
@@ -711,7 +739,7 @@ function appendBlock(body, block) {
   body.append(renderCodeCard(block.content, block.type === "code" ? "Code" : block.type));
 }
 
-function renderPendingCard() {
+function renderPendingCard(traceMessages = []) {
   const wrapper = document.createElement("section");
   wrapper.className = "pending-card";
   wrapper.setAttribute("aria-label", "Agent is working");
@@ -721,62 +749,38 @@ function renderPendingCard() {
   dots.innerHTML = "<span></span><span></span><span></span>";
 
   wrapper.append(dots);
+  wrapper.append(renderLiveProgress(traceMessages));
   return wrapper;
 }
 
-function renderTracePanel(traceMessages) {
-  const wrapper = document.createElement("details");
-  wrapper.className = "trace-toggle";
+function renderLiveProgress(traceMessages = []) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "live-progress";
 
-  const summary = document.createElement("summary");
-  summary.className = "trace-head";
+  const title = document.createElement("div");
+  title.className = "live-progress-title";
+  title.textContent = traceMessages.length > 0 ? "Working through the task" : "Working...";
+  wrapper.append(title);
 
-  const label = document.createElement("span");
-  label.className = "trace-summary";
-  label.textContent = "View execution steps";
+  const list = document.createElement("ol");
+  list.className = "live-progress-list";
 
-  const count = document.createElement("span");
-  count.className = "trace-count";
-  count.textContent = `${traceMessages.length} steps`;
-
-  summary.append(label, count);
-  wrapper.append(summary);
-
-  const panel = document.createElement("div");
-  panel.className = "trace-panel";
-
-  for (const trace of traceMessages) {
-    const step = document.createElement("section");
-    step.className = "trace-step";
-
-    const head = document.createElement("div");
-    head.className = "trace-step-head";
-
-    const title = document.createElement("h4");
-    title.textContent = trace.kind === "tool_call" ? `Call · ${trace.tool_name || "unknown"}` : `Result · ${trace.tool_name || "unknown"}`;
-
-    const badge = document.createElement("span");
-    badge.className = "message-kind";
-    badge.textContent = trace.kind === "tool_call" ? "tool call" : "tool result";
-
-    head.append(title, badge);
-    step.append(head);
-
-    const details = document.createElement("details");
-    details.open = trace.kind === "tool_call";
-
-    const detailsSummary = document.createElement("summary");
-    detailsSummary.textContent = trace.kind === "tool_call" ? "Arguments" : "Output";
-
-    const pre = document.createElement("pre");
-    pre.textContent = trace.kind === "tool_call" ? trace.tool_args || trace.content || "(empty)" : trace.tool_output || trace.content || "(empty)";
-
-    details.append(detailsSummary, pre);
-    step.append(details);
-    panel.append(step);
+  const visibleItems = traceMessages.slice(-8).map(summarizeTrace).filter(Boolean);
+  if (visibleItems.length === 0) {
+    const item = document.createElement("li");
+    item.className = "live-progress-item current";
+    item.textContent = "Preparing the next step";
+    list.append(item);
+  } else {
+    visibleItems.forEach((summary, index) => {
+      const item = document.createElement("li");
+      item.className = `live-progress-item ${index === visibleItems.length - 1 ? "current" : ""}`;
+      item.textContent = summary;
+      list.append(item);
+    });
   }
 
-  wrapper.append(panel);
+  wrapper.append(list);
   return wrapper;
 }
 
@@ -981,11 +985,109 @@ function kindLabelText(kind) {
   const labels = {
     user: "prompt",
     assistant: "reply",
+    assistant_trace: "progress",
+    context_compacted: "compact",
     tool_call: "tool call",
     tool_result: "tool result",
     system: "system",
   };
   return labels[kind] || kind;
+}
+
+function summarizeTrace(trace) {
+  if (!trace) {
+    return "";
+  }
+
+  if (trace.kind === "assistant_trace") {
+    return truncateProgressText(firstVisibleLine(trace.content), 140);
+  }
+
+  if (trace.kind === "tool_call") {
+    return summarizeToolCall(trace.tool_name, trace.tool_args || trace.content || "");
+  }
+
+  if (trace.kind === "tool_result") {
+    return summarizeToolResult(trace);
+  }
+
+  if (trace.kind === "context_compacted") {
+    const payload = parseJsonObject(trace.content);
+    const removed = payload?.removed_messages;
+    return removed ? `Context compacted · removed ${removed} messages` : "Context compacted";
+  }
+
+  return truncateProgressText(firstVisibleLine(trace.content || kindLabelText(trace.kind)), 140);
+}
+
+function summarizeToolCall(toolName, rawArgs) {
+  const name = toolName || "tool";
+  const args = parseJsonObject(rawArgs);
+  const path = stringArg(args, "path") || stringArg(args, "file_path") || stringArg(args, "target_path");
+  const pattern = stringArg(args, "pattern") || stringArg(args, "query");
+
+  if (name === "read_file") {
+    return `Reading ${path || "a file"}`;
+  }
+  if (name === "grep_search") {
+    return `Searching ${pattern || "the codebase"}`;
+  }
+  if (name === "glob_search") {
+    return `Scanning ${pattern || "project files"}`;
+  }
+  if (name === "write_file") {
+    return `Writing ${path || "a file"}`;
+  }
+  if (name === "todo_write") {
+    return "Updating task list";
+  }
+  if (name === "task") {
+    return "Delegating subtask";
+  }
+
+  return `Running ${name}`;
+}
+
+function summarizeToolResult(trace) {
+  const name = trace.tool_name || "tool";
+  const output = trace.tool_output || trace.content || "";
+  const lower = output.toLowerCase();
+  if (lower.includes("tool_error") || lower.includes("error")) {
+    return `${name} reported an issue`;
+  }
+  return `${name} completed`;
+}
+
+function parseJsonObject(value) {
+  if (!value) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringArg(args, key) {
+  const value = args?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function firstVisibleLine(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+}
+
+function truncateProgressText(text, maxLength) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
 function scrollToBottom() {

@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -190,6 +191,18 @@ impl LiveEvent {
         }
     }
 
+    fn trace_added(agent_kind: AgentKind, message: UiMessage) -> Self {
+        Self {
+            event_type: "trace_added".to_string(),
+            agent_kind,
+            snapshot: None,
+            response: None,
+            message: Some(message),
+            workflow: None,
+            error: None,
+        }
+    }
+
     fn turn_finished(response: LiveSubmitResponse, workflow: Option<WorkflowSnapshot>) -> Self {
         Self {
             event_type: "turn_finished".to_string(),
@@ -261,6 +274,11 @@ struct PendingUiMessage {
     tool_output: Option<String>,
 }
 
+enum PendingLiveMessage {
+    Visible(PendingUiMessage),
+    Trace(PendingUiMessage),
+}
+
 type TurnCompletionHandler =
     Arc<dyn Fn(&LiveSubmitResponse) -> Option<WorkflowSnapshot> + Send + Sync>;
 
@@ -277,6 +295,7 @@ struct LiveConversationInner {
     session_id: Option<String>,
     ui_messages: Vec<UiMessage>,
     next_message_index: usize,
+    next_trace_index: usize,
     status: LiveStatus,
     last_error: Option<String>,
 }
@@ -308,19 +327,43 @@ impl LiveConversationManager {
                     if persisted.session_id.as_deref()
                         == Some(session.snapshot().session_id.as_str()) =>
                 {
+                    let snapshot = session.snapshot();
+                    let ui_snapshot = load_persisted_snapshot(
+                        &ask_app.ui_session_snapshot_path(agent_kind, &snapshot.session_id),
+                    )?;
+                    let (_, _, fallback_messages, _, _) = session_state_from_snapshot(snapshot);
+                    let messages = ui_snapshot
+                        .as_ref()
+                        .map(|snapshot| visible_messages_only(&snapshot.messages))
+                        .unwrap_or(fallback_messages);
                     (
                         persisted.title.clone(),
                         persisted.session_id.clone(),
-                        persisted.messages.clone(),
+                        messages,
                         status_from_str(&persisted.status),
                         persisted.last_error.clone(),
                     )
                 }
-                (Some(session), _) => session_state_from_snapshot(session.snapshot()),
+                (Some(session), _) => {
+                    let snapshot = session.snapshot();
+                    if let Some(ui_snapshot) = load_persisted_snapshot(
+                        &ask_app.ui_session_snapshot_path(agent_kind, &snapshot.session_id),
+                    )? {
+                        (
+                            ui_snapshot.title,
+                            ui_snapshot.session_id,
+                            visible_messages_only(&ui_snapshot.messages),
+                            status_from_str(&ui_snapshot.status),
+                            ui_snapshot.last_error,
+                        )
+                    } else {
+                        session_state_from_snapshot(snapshot)
+                    }
+                }
                 (None, Some(persisted)) if persisted.session_id.is_none() => (
                     persisted.title.clone(),
                     None,
-                    persisted.messages.clone(),
+                    visible_messages_only(&persisted.messages),
                     status_from_str(&persisted.status),
                     persisted.last_error.clone(),
                 ),
@@ -342,6 +385,7 @@ impl LiveConversationManager {
                 title,
                 session_id,
                 next_message_index: ui_messages.len(),
+                next_trace_index: 0,
                 ui_messages,
                 status,
                 last_error,
@@ -363,7 +407,22 @@ impl LiveConversationManager {
 
     fn persist_snapshot(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
-        save_persisted_snapshot(&self.snapshot_path, &snapshot)
+        self.persist_snapshot_value(&snapshot)
+    }
+
+    fn persist_snapshot_value(&self, snapshot: &LiveSnapshot) -> Result<()> {
+        let mut snapshot = snapshot.clone();
+        snapshot.messages = visible_messages_only(&snapshot.messages);
+        save_persisted_snapshot(&self.snapshot_path, &snapshot)?;
+        if let Some(session_id) = snapshot.session_id.as_deref() {
+            save_persisted_snapshot(
+                &self
+                    .ask_app
+                    .ui_session_snapshot_path(self.agent_kind, session_id),
+                &snapshot,
+            )?;
+        }
+        Ok(())
     }
 
     fn subscribe(&self) -> broadcast::Receiver<LiveEvent> {
@@ -383,6 +442,19 @@ impl LiveConversationManager {
         let started = self.start_turn(prompt, turn_id)?;
         let response = started.response.clone();
         self.broadcast(LiveEvent::turn_started(response.clone(), None));
+        let _ = self.append_trace_message(
+            &started.session_id,
+            started.turn_id,
+            PendingUiMessage {
+                role: "assistant".to_string(),
+                kind: "assistant_trace".to_string(),
+                content: "Preparing to analyze the request.".to_string(),
+                created_at: now_unix_ms(),
+                tool_name: None,
+                tool_args: None,
+                tool_output: None,
+            },
+        );
 
         let manager = Arc::clone(self);
         task::spawn_blocking(move || {
@@ -420,12 +492,13 @@ impl LiveConversationManager {
                     inner.title = self.agent_kind.title().to_string();
                     inner.session_id = None;
                     inner.next_message_index = 0;
+                    inner.next_trace_index = 0;
                     inner.ui_messages = Vec::new();
                     inner.status = LiveStatus::Idle;
                     inner.last_error = None;
                     self.snapshot_from_inner(&inner)
                 };
-                save_persisted_snapshot(&self.snapshot_path, &persisted)
+                self.persist_snapshot_value(&persisted)
                     .map_err(AppError::internal)?;
                 self.broadcast(LiveEvent::snapshot(self.agent_kind, persisted, None));
                 return Ok(None);
@@ -433,7 +506,23 @@ impl LiveConversationManager {
         };
         let snapshot = session.snapshot().clone();
         let (title, current_session_id, ui_messages, status, last_error) =
-            session_state_from_snapshot(&snapshot);
+            if let Some(ui_snapshot) = load_persisted_snapshot(
+                &self
+                    .ask_app
+                    .ui_session_snapshot_path(self.agent_kind, &snapshot.session_id),
+            )
+            .map_err(AppError::internal)?
+            {
+                (
+                    ui_snapshot.title,
+                    ui_snapshot.session_id,
+                    visible_messages_only(&ui_snapshot.messages),
+                    status_from_str(&ui_snapshot.status),
+                    ui_snapshot.last_error,
+                )
+            } else {
+                session_state_from_snapshot(&snapshot)
+            };
 
         let persisted = {
             let mut inner = self.inner.lock().map_err(|_| {
@@ -450,13 +539,15 @@ impl LiveConversationManager {
             inner.title = title;
             inner.session_id = current_session_id;
             inner.next_message_index = ui_messages.len();
+            inner.next_trace_index = 0;
             inner.ui_messages = ui_messages;
             inner.status = status;
             inner.last_error = last_error;
             self.snapshot_from_inner(&inner)
         };
 
-        save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+        self.persist_snapshot_value(&persisted)
+            .map_err(AppError::internal)?;
         self.broadcast(LiveEvent::snapshot(
             self.agent_kind,
             persisted.clone(),
@@ -495,13 +586,15 @@ impl LiveConversationManager {
             inner.title = title;
             inner.session_id = current_session_id;
             inner.next_message_index = ui_messages.len();
+            inner.next_trace_index = 0;
             inner.ui_messages = ui_messages;
             inner.status = status;
             inner.last_error = last_error;
             self.snapshot_from_inner(&inner)
         };
 
-        save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+        self.persist_snapshot_value(&persisted)
+            .map_err(AppError::internal)?;
         self.broadcast(LiveEvent::snapshot(
             self.agent_kind,
             persisted.clone(),
@@ -561,7 +654,8 @@ impl LiveConversationManager {
             }
 
             let persisted = self.snapshot_from_inner(&inner);
-            save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+            self.persist_snapshot_value(&persisted)
+                .map_err(AppError::internal)?;
 
             (session, snapshot.session_id)
         };
@@ -599,18 +693,24 @@ impl LiveConversationManager {
         let event_manager = Arc::clone(&self);
         let event_session_id = started.session_id.clone();
         let event_turn_id = started.turn_id;
-        let observer: RuntimeEventSink = Arc::new(move |event| {
-            if let Some(message) = pending_message_from_event(event) {
-                if let Err(error) =
-                    event_manager.append_runtime_message(&event_session_id, event_turn_id, message)
-                {
-                    eprintln!(
-                        "error: failed to append live runtime event: {}",
-                        error.message
-                    );
+        let observer: RuntimeEventSink =
+            Arc::new(move |event| {
+                if let Some(message) = pending_message_from_event(event) {
+                    let result =
+                        match message {
+                            PendingLiveMessage::Visible(message) => event_manager
+                                .append_visible_message(&event_session_id, event_turn_id, message),
+                            PendingLiveMessage::Trace(message) => event_manager
+                                .append_trace_message(&event_session_id, event_turn_id, message),
+                        };
+                    if let Err(error) = result {
+                        eprintln!(
+                            "error: failed to append live runtime event: {}",
+                            error.message
+                        );
+                    }
                 }
-            }
-        });
+            });
 
         let runtime_result = self.ask_app.run_session_turn_with_events(
             self.agent_kind,
@@ -629,7 +729,7 @@ impl LiveConversationManager {
         Ok(())
     }
 
-    fn append_runtime_message(
+    fn append_visible_message(
         &self,
         session_id: &str,
         turn_id: u64,
@@ -654,13 +754,54 @@ impl LiveConversationManager {
             inner.next_message_index += 1;
             inner.ui_messages.push(ui_message.clone());
             let persisted = self.snapshot_from_inner(&inner);
-            save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+            self.persist_snapshot_value(&persisted)
+                .map_err(AppError::internal)?;
             ui_message
         };
 
         self.broadcast(LiveEvent::message_added(
             self.agent_kind,
             ui_message.clone(),
+        ));
+        Ok(ui_message)
+    }
+
+    fn append_trace_message(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        pending: PendingUiMessage,
+    ) -> Result<UiMessage, AppError> {
+        let ui_message = {
+            let mut inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+            let ui_message = base_trace_message(
+                session_id,
+                inner.next_trace_index,
+                &pending.role,
+                &pending.kind,
+                pending.content,
+                pending.created_at,
+                pending.tool_name,
+                pending.tool_args,
+                pending.tool_output,
+                turn_id,
+            );
+            inner.next_trace_index += 1;
+            ui_message
+        };
+
+        append_trace_message_to_disk(
+            &self
+                .ask_app
+                .trace_turn_path(self.agent_kind, session_id, &ui_message.turn_id),
+            &ui_message,
+        )
+        .map_err(AppError::internal)?;
+        self.broadcast(LiveEvent::trace_added(
+            self.agent_kind,
+            public_trace_message(&ui_message),
         ));
         Ok(ui_message)
     }
@@ -690,7 +831,8 @@ impl LiveConversationManager {
             }
 
             let persisted = self.snapshot_from_inner(&inner);
-            save_persisted_snapshot(&self.snapshot_path, &persisted).map_err(AppError::internal)?;
+            self.persist_snapshot_value(&persisted)
+                .map_err(AppError::internal)?;
             let turn_messages = inner
                 .ui_messages
                 .iter()
@@ -732,12 +874,20 @@ impl LiveConversationManager {
 
     fn replace_session(&self, session: ConversationSession) -> Result<()> {
         let snapshot = session.snapshot().clone();
-        let ui_messages = flatten_messages(
-            &snapshot.session_id,
-            &snapshot.messages,
-            0,
-            snapshot.updated_at_unix_ms,
-        );
+        let ui_messages = load_persisted_snapshot(
+            &self
+                .ask_app
+                .ui_session_snapshot_path(self.agent_kind, &snapshot.session_id),
+        )?
+        .map(|snapshot| visible_messages_only(&snapshot.messages))
+        .unwrap_or_else(|| {
+            flatten_messages(
+                &snapshot.session_id,
+                &snapshot.messages,
+                0,
+                snapshot.updated_at_unix_ms,
+            )
+        });
         let mut inner = self
             .inner
             .lock()
@@ -745,12 +895,13 @@ impl LiveConversationManager {
         inner.title = summary_title(&snapshot);
         inner.session_id = Some(snapshot.session_id);
         inner.next_message_index = ui_messages.len();
+        inner.next_trace_index = 0;
         inner.ui_messages = ui_messages;
         inner.session = Some(session);
         inner.status = LiveStatus::WaitingForInput;
         inner.last_error = None;
         let persisted = self.snapshot_from_inner(&inner);
-        save_persisted_snapshot(&self.snapshot_path, &persisted)?;
+        self.persist_snapshot_value(&persisted)?;
         self.broadcast(LiveEvent::snapshot(self.agent_kind, persisted, None));
         Ok(())
     }
@@ -1213,6 +1364,10 @@ pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
             "/api/agents/{agent_kind}/messages",
             post(post_agent_message),
         )
+        .route(
+            "/api/agents/{agent_kind}/sessions/{session_id}/trace/{turn_id}",
+            get(get_agent_turn_trace),
+        )
         .route("/api/interview/start", post(post_interview_start))
         .route("/api/interview/finish", post(post_interview_finish))
         .route("/api/interview/report", get(get_interview_report))
@@ -1325,6 +1480,25 @@ async fn post_agent_message(
     let prompt = non_empty_prompt(body.prompt)?;
     let response = state.workflow.submit_user_message(agent_kind, prompt)?;
     Ok(Json(response))
+}
+
+async fn get_agent_turn_trace(
+    State(state): State<WebState>,
+    AxumPath((agent_kind, session_id, turn_id)): AxumPath<(String, String, String)>,
+) -> Result<Json<Vec<UiMessage>>, AppError> {
+    let agent_kind = parse_agent_kind(&agent_kind)?;
+    if session_id.trim().is_empty() || turn_id.trim().is_empty() {
+        return Err(AppError::bad_request(
+            "session_id and turn_id must not be empty",
+        ));
+    }
+    let path = state
+        .workflow
+        .ask_app
+        .trace_turn_path(agent_kind, &session_id, &turn_id);
+    Ok(Json(
+        load_trace_messages(&path).map_err(AppError::internal)?,
+    ))
 }
 
 async fn post_interview_start(
@@ -1567,7 +1741,7 @@ fn save_persisted_snapshot(path: &FsPath, snapshot: &LiveSnapshot) -> Result<()>
         .with_context(|| format!("failed to write live snapshot: {}", path.display()))
 }
 
-fn pending_message_from_event(event: RuntimeEvent) -> Option<PendingUiMessage> {
+fn pending_message_from_event(event: RuntimeEvent) -> Option<PendingLiveMessage> {
     match event {
         RuntimeEvent::AssistantMessage(message) => {
             let content = message
@@ -1579,22 +1753,54 @@ fn pending_message_from_event(event: RuntimeEvent) -> Option<PendingUiMessage> {
             if content.is_empty() {
                 return None;
             }
+            let has_tool_calls = message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
 
-            Some(PendingUiMessage {
+            let pending = PendingUiMessage {
                 role: "assistant".to_string(),
-                kind: "assistant".to_string(),
+                kind: if has_tool_calls {
+                    "assistant_trace".to_string()
+                } else {
+                    "assistant".to_string()
+                },
                 content,
                 created_at: now_unix_ms(),
                 tool_name: None,
                 tool_args: None,
                 tool_output: None,
-            })
+            };
+
+            if has_tool_calls {
+                Some(PendingLiveMessage::Trace(pending))
+            } else {
+                Some(PendingLiveMessage::Visible(pending))
+            }
         }
+        RuntimeEvent::Compaction {
+            removed_messages,
+            estimated_tokens_before,
+            transcript_path,
+        } => Some(PendingLiveMessage::Trace(PendingUiMessage {
+            role: "system".to_string(),
+            kind: "context_compacted".to_string(),
+            content: serde_json::json!({
+                "removed_messages": removed_messages,
+                "estimated_tokens_before": estimated_tokens_before,
+                "transcript_path": transcript_path,
+            })
+            .to_string(),
+            created_at: now_unix_ms(),
+            tool_name: None,
+            tool_args: None,
+            tool_output: None,
+        })),
         RuntimeEvent::ToolCall {
             tool_call_id: _tool_call_id,
             name,
             arguments,
-        } => Some(PendingUiMessage {
+        } => Some(PendingLiveMessage::Trace(PendingUiMessage {
             role: "assistant".to_string(),
             kind: "tool_call".to_string(),
             content: String::new(),
@@ -1602,13 +1808,13 @@ fn pending_message_from_event(event: RuntimeEvent) -> Option<PendingUiMessage> {
             tool_name: Some(name),
             tool_args: Some(arguments),
             tool_output: None,
-        }),
+        })),
         RuntimeEvent::ToolResult {
             tool_call_id: _tool_call_id,
             name,
             arguments,
             result,
-        } => Some(PendingUiMessage {
+        } => Some(PendingLiveMessage::Trace(PendingUiMessage {
             role: "tool".to_string(),
             kind: "tool_result".to_string(),
             content: String::new(),
@@ -1616,7 +1822,7 @@ fn pending_message_from_event(event: RuntimeEvent) -> Option<PendingUiMessage> {
             tool_name: Some(name),
             tool_args: Some(arguments),
             tool_output: Some(result),
-        }),
+        })),
     }
 }
 
@@ -1627,7 +1833,6 @@ fn flatten_messages(
     created_at: u128,
 ) -> Vec<UiMessage> {
     let mut ui_messages = Vec::new();
-    let mut tool_calls = std::collections::HashMap::<String, (String, String)>::new();
     let mut turn_number = 0u64;
 
     for (index, message) in messages.iter().enumerate() {
@@ -1669,7 +1874,11 @@ fn flatten_messages(
         let effective_turn = if turn_number == 0 { 1 } else { turn_number };
 
         if role == "assistant" {
-            if !content.trim().is_empty() {
+            let has_tool_calls = message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+            if !has_tool_calls && !content.trim().is_empty() {
                 ui_messages.push(base_ui_message(
                     session_id,
                     absolute_index,
@@ -1683,66 +1892,10 @@ fn flatten_messages(
                     effective_turn,
                 ));
             }
-
-            if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
-                for (call_index, call) in calls.iter().enumerate() {
-                    let tool_call_id = call
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let name = call
-                        .get("function")
-                        .and_then(|v| v.get("name"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let arguments = call
-                        .get("function")
-                        .and_then(|v| v.get("arguments"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-
-                    tool_calls.insert(tool_call_id, (name.clone(), arguments.clone()));
-                    ui_messages.push(base_ui_message(
-                        session_id,
-                        absolute_index * 100 + call_index,
-                        "assistant",
-                        "tool_call",
-                        String::new(),
-                        created_at,
-                        Some(name),
-                        Some(arguments),
-                        None,
-                        effective_turn,
-                    ));
-                }
-            }
             continue;
         }
 
         if role == "tool" {
-            let tool_call_id = message
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let (tool_name, tool_args) = tool_calls
-                .get(tool_call_id)
-                .cloned()
-                .unwrap_or_else(|| ("unknown".to_string(), String::new()));
-            ui_messages.push(base_ui_message(
-                session_id,
-                absolute_index,
-                "tool",
-                "tool_result",
-                String::new(),
-                created_at,
-                Some(tool_name),
-                Some(tool_args),
-                Some(content),
-                effective_turn,
-            ));
             continue;
         }
 
@@ -1797,6 +1950,113 @@ fn base_ui_message(
     }
 }
 
+fn base_trace_message(
+    session_id: &str,
+    index: usize,
+    role: &str,
+    kind: &str,
+    content: String,
+    created_at: u128,
+    tool_name: Option<String>,
+    tool_args: Option<String>,
+    tool_output: Option<String>,
+    turn_id: u64,
+) -> UiMessage {
+    let mut message = base_ui_message(
+        session_id,
+        index,
+        role,
+        kind,
+        content,
+        created_at,
+        tool_name,
+        tool_args,
+        tool_output,
+        turn_id,
+    );
+    message.id = format!("{session_id}-trace-{turn_id}-{index}-{kind}");
+    message
+}
+
+fn visible_messages_only(messages: &[UiMessage]) -> Vec<UiMessage> {
+    messages
+        .iter()
+        .filter(|message| is_visible_ui_message(message))
+        .cloned()
+        .collect()
+}
+
+fn is_visible_ui_message(message: &UiMessage) -> bool {
+    matches!(message.kind.as_str(), "user" | "assistant" | "system")
+}
+
+fn public_trace_message(message: &UiMessage) -> UiMessage {
+    let mut public = message.clone();
+    match public.kind.as_str() {
+        "tool_result" => {
+            let output = public.tool_output.as_deref().unwrap_or_default();
+            public.content = if output.to_ascii_lowercase().contains("tool_error") {
+                "tool_error".to_string()
+            } else {
+                "completed".to_string()
+            };
+            public.tool_output = None;
+            public.render_blocks = parse_render_blocks(&public.content, &public.kind);
+        }
+        "tool_call" => {
+            public.tool_output = None;
+            public.render_blocks = parse_render_blocks(
+                public.tool_args.as_deref().unwrap_or_default(),
+                &public.kind,
+            );
+        }
+        "assistant_trace" | "context_compacted" => {}
+        _ => {
+            public.tool_args = None;
+            public.tool_output = None;
+        }
+    }
+    public
+}
+
+fn append_trace_message_to_disk(path: &FsPath, message: &UiMessage) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create trace dir: {}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open trace file: {}", path.display()))?;
+    let line = serde_json::to_string(message).context("failed to serialize trace message")?;
+    writeln!(file, "{line}")
+        .with_context(|| format!("failed to write trace file: {}", path.display()))
+}
+
+fn load_trace_messages(path: &FsPath) -> Result<Vec<UiMessage>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read trace file: {}", path.display()))?;
+    let mut messages = Vec::new();
+    for (line_number, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let message = serde_json::from_str::<UiMessage>(line).with_context(|| {
+            format!(
+                "failed to parse trace message at {}:{}",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        messages.push(message);
+    }
+    Ok(messages)
+}
+
 fn parse_render_blocks(content: &str, kind: &str) -> Vec<UiRenderBlock> {
     if kind == "tool_call" {
         return vec![UiRenderBlock {
@@ -1808,6 +2068,13 @@ fn parse_render_blocks(content: &str, kind: &str) -> Vec<UiRenderBlock> {
     if kind == "tool_result" {
         return vec![UiRenderBlock {
             block_type: "tool_result".to_string(),
+            content: content.to_string(),
+        }];
+    }
+
+    if kind == "assistant_trace" || kind == "context_compacted" {
+        return vec![UiRenderBlock {
+            block_type: kind.to_string(),
             content: content.to_string(),
         }];
     }
@@ -1983,5 +2250,94 @@ impl IntoResponse for AppError {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn flatten_messages_keeps_only_user_and_final_assistant_replies() {
+        let messages = vec![
+            json!({"role": "system", "content": "system"}),
+            json!({"role": "user", "content": "Explain the architecture"}),
+            json!({
+                "role": "assistant",
+                "content": "I will inspect the code first.",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{\"path\":\"src/main.rs\"}"}
+                }]
+            }),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "file contents"}),
+            json!({"role": "assistant", "content": "Final architecture summary."}),
+        ];
+
+        let ui_messages = flatten_messages("session_test", &messages, 0, 1);
+
+        assert_eq!(ui_messages.len(), 2);
+        assert_eq!(ui_messages[0].kind, "user");
+        assert_eq!(ui_messages[1].kind, "assistant");
+        assert_eq!(ui_messages[1].content, "Final architecture summary.");
+    }
+
+    #[test]
+    fn visible_messages_filter_excludes_trace_messages() {
+        let messages = vec![
+            base_ui_message(
+                "session_test",
+                0,
+                "user",
+                "user",
+                "hello".to_string(),
+                1,
+                None,
+                None,
+                None,
+                1,
+            ),
+            base_trace_message(
+                "session_test",
+                0,
+                "assistant",
+                "tool_call",
+                String::new(),
+                1,
+                Some("read_file".to_string()),
+                Some("{}".to_string()),
+                None,
+                1,
+            ),
+        ];
+
+        let visible = visible_messages_only(&messages);
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].kind, "user");
+    }
+
+    #[test]
+    fn public_trace_message_strips_tool_result_output() {
+        let message = base_trace_message(
+            "session_test",
+            0,
+            "tool",
+            "tool_result",
+            String::new(),
+            1,
+            Some("read_file".to_string()),
+            Some(r#"{"path":"src/main.rs"}"#.to_string()),
+            Some("very large file contents".repeat(100)),
+            1,
+        );
+
+        let public = public_trace_message(&message);
+
+        assert_eq!(public.kind, "tool_result");
+        assert_eq!(public.content, "completed");
+        assert!(public.tool_output.is_none());
     }
 }
