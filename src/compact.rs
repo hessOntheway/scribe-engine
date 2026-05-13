@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,9 +12,12 @@ use crate::llm::openai::OpenAiCompatClient;
 use crate::llm::usage::PromptCacheStats;
 use crate::tools::ToolDefinition;
 
-const COMPACTED_TOOL_RESULT_NOTICE: &str = "[Previous tool_result compacted]";
 const CONTINUATION_PREFIX: &str = "[Context compacted]";
+const CONTINUATION_SUFFIX: &str = "Continue from this summary and the recent messages.";
 const MAX_SUMMARY_SOURCE_CHARS: usize = 60_000;
+const DEFAULT_SUMMARY_MAX_CHARS: usize = 1_200;
+const DEFAULT_SUMMARY_MAX_LINES: usize = 24;
+const DEFAULT_SUMMARY_MAX_LINE_CHARS: usize = 160;
 
 #[derive(Debug, Clone)]
 pub struct AutoCompactEvent {
@@ -23,67 +26,58 @@ pub struct AutoCompactEvent {
     pub transcript_path: Option<PathBuf>,
 }
 
-pub fn apply_micro_compact(messages: &mut [Value], cfg: &ContextCompactConfig) {
-    if !cfg.enabled {
-        return;
-    }
-
-    let mut call_id_to_tool_name: BTreeMap<String, String> = BTreeMap::new();
-    for message in messages.iter() {
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
-            continue;
-        };
-        for call in tool_calls {
-            let Some(call_id) = call.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(name) = call
-                .get("function")
-                .and_then(Value::as_object)
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            call_id_to_tool_name.insert(call_id.to_string(), name.to_string());
-        }
-    }
-
-    let mut compactable_tool_indices: Vec<usize> = Vec::new();
-    for (idx, message) in messages.iter().enumerate() {
-        if message.get("role").and_then(Value::as_str) != Some("tool") {
-            continue;
-        }
-        let Some(content) = message.get("content").and_then(Value::as_str) else {
-            continue;
-        };
-        if content == COMPACTED_TOOL_RESULT_NOTICE {
-            continue;
-        }
-        if content.chars().count() < cfg.micro_min_tool_result_chars {
-            continue;
-        }
-        compactable_tool_indices.push(idx);
-    }
-
-    if compactable_tool_indices.len() <= cfg.micro_keep_recent_tool_results {
-        return;
-    }
-
-    let to_compact = compactable_tool_indices
-        .len()
-        .saturating_sub(cfg.micro_keep_recent_tool_results);
-    for idx in compactable_tool_indices.into_iter().take(to_compact) {
-        let notice = tool_notice_for_message(&messages[idx], &call_id_to_tool_name);
-        messages[idx]["content"] = Value::String(notice);
-    }
+pub fn apply_micro_compact(_messages: &mut [Value], cfg: &ContextCompactConfig) {
+    // Kept as a compatibility hook for existing call sites and environment
+    // knobs. Tool result payloads must remain stable between requests so
+    // provider prompt caches can hit reliably.
+    let _ = (
+        cfg.micro_keep_recent_tool_results,
+        cfg.micro_min_tool_result_chars,
+    );
 }
 
 pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
     messages.iter().map(estimate_message_tokens).sum::<usize>()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompactPlan {
+    compacted_prefix_len: usize,
+    keep_from: usize,
+    removed_messages: usize,
+    estimated_tokens_before: usize,
+}
+
+fn plan_auto_compact(messages: &[Value], cfg: &ContextCompactConfig) -> Option<CompactPlan> {
+    if !cfg.enabled || cfg.auto_token_threshold == 0 {
+        return None;
+    }
+
+    let compacted_prefix_len = compacted_summary_prefix_len(messages);
+    let compactable = messages.get(compacted_prefix_len..)?;
+    if compactable.len() <= cfg.auto_preserve_recent_messages {
+        return None;
+    }
+
+    let compactable_tokens = estimate_messages_tokens(compactable);
+    if compactable_tokens < cfg.auto_token_threshold {
+        return None;
+    }
+
+    let keep_from = messages
+        .len()
+        .saturating_sub(cfg.auto_preserve_recent_messages);
+    let keep_from = adjust_keep_from_to_tool_boundary(messages, keep_from);
+    if keep_from <= compacted_prefix_len {
+        return None;
+    }
+
+    Some(CompactPlan {
+        compacted_prefix_len,
+        keep_from,
+        removed_messages: keep_from.saturating_sub(compacted_prefix_len),
+        estimated_tokens_before: estimate_messages_tokens(messages),
+    })
 }
 
 pub fn auto_compact_if_needed(
@@ -102,14 +96,9 @@ pub fn auto_compact_if_needed(
         return Ok(None);
     }
 
-    let estimated_tokens_before = estimate_messages_tokens(messages);
-    if estimated_tokens_before < cfg.auto_token_threshold {
+    let Some(plan) = plan_auto_compact(messages, cfg) else {
         return Ok(None);
-    }
-
-    if messages.len() <= cfg.auto_preserve_recent_messages {
-        return Ok(None);
-    }
+    };
 
     let transcript_path = match backup_transcript(messages, &cfg.transcript_dir) {
         Ok(path) => Some(path),
@@ -119,16 +108,9 @@ pub fn auto_compact_if_needed(
         }
     };
 
-    let keep_from = messages
-        .len()
-        .saturating_sub(cfg.auto_preserve_recent_messages);
-    let keep_from = adjust_keep_from_to_tool_boundary(messages, keep_from);
-    if keep_from == 0 {
-        return Ok(None);
-    }
-    let removed = messages[..keep_from].to_vec();
+    let removed = messages[plan.compacted_prefix_len..plan.keep_from].to_vec();
     let summary_source = build_compact_summary_source(&removed);
-    let summary = match generate_compact_summary(
+    let new_summary = match generate_compact_summary(
         llm,
         messages,
         &summary_source,
@@ -143,21 +125,37 @@ pub fn auto_compact_if_needed(
         }
     };
 
-    let mut next_messages: Vec<Value> = Vec::with_capacity(cfg.auto_preserve_recent_messages + 1);
-    next_messages.push(json!({
-        "role": "system",
-        "content": format!("{CONTINUATION_PREFIX}\n\n{summary}\n\nContinue from this summary and the recent messages."),
-    }));
-    next_messages.extend_from_slice(&messages[keep_from..]);
-
-    let removed_messages = keep_from;
+    let existing_summary = messages
+        .first()
+        .and_then(extract_existing_compacted_summary);
+    let summary = merge_compact_summaries(existing_summary.as_deref(), &new_summary);
+    let next_messages = build_messages_after_compaction(messages, &plan, &summary);
     *messages = next_messages;
 
     Ok(Some(AutoCompactEvent {
-        removed_messages,
-        estimated_tokens_before,
+        removed_messages: plan.removed_messages,
+        estimated_tokens_before: plan.estimated_tokens_before,
         transcript_path,
     }))
+}
+
+fn build_messages_after_compaction(
+    messages: &[Value],
+    plan: &CompactPlan,
+    summary: &str,
+) -> Vec<Value> {
+    let preserved = messages.get(plan.keep_from..).unwrap_or_default();
+    let mut next_messages: Vec<Value> = Vec::with_capacity(preserved.len() + 1);
+    next_messages.push(json!({
+        "role": "system",
+        "content": compact_continuation_message(summary),
+    }));
+    next_messages.extend_from_slice(preserved);
+    next_messages
+}
+
+fn compact_continuation_message(summary: &str) -> String {
+    format!("{CONTINUATION_PREFIX}\n\n{summary}\n\n{CONTINUATION_SUFFIX}")
 }
 
 pub fn remove_orphan_tool_messages(messages: &mut Vec<Value>) -> usize {
@@ -246,6 +244,29 @@ fn adjust_keep_from_to_tool_boundary(messages: &[Value], mut keep_from: usize) -
     keep_from
 }
 
+fn compacted_summary_prefix_len(messages: &[Value]) -> usize {
+    usize::from(
+        messages
+            .first()
+            .and_then(extract_existing_compacted_summary)
+            .is_some(),
+    )
+}
+
+fn extract_existing_compacted_summary(message: &Value) -> Option<String> {
+    if message.get("role").and_then(Value::as_str) != Some("system") {
+        return None;
+    }
+
+    let content = message.get("content").and_then(Value::as_str)?;
+    let summary = content.strip_prefix(CONTINUATION_PREFIX)?;
+    let summary = summary.trim_start_matches('\n');
+    let summary = summary
+        .split_once(&format!("\n\n{CONTINUATION_SUFFIX}"))
+        .map_or(summary, |(value, _)| value);
+    Some(summary.trim().to_string())
+}
+
 fn assistant_tool_call_ids(message: &Value) -> Vec<String> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return Vec::new();
@@ -300,20 +321,204 @@ fn generate_compact_summary(
         .context("compact summary response missing content")
 }
 
-fn tool_notice_for_message(
-    message: &Value,
-    call_id_to_tool_name: &BTreeMap<String, String>,
-) -> String {
-    let tool_name = message
-        .get("tool_call_id")
-        .and_then(Value::as_str)
-        .and_then(|id| call_id_to_tool_name.get(id))
-        .cloned();
+fn merge_compact_summaries(existing_summary: Option<&str>, new_summary: &str) -> String {
+    let new_summary = new_summary.trim();
+    let Some(existing_summary) = existing_summary.map(str::trim).filter(|s| !s.is_empty()) else {
+        return compress_summary_text(new_summary);
+    };
 
-    match tool_name {
-        Some(name) => format!("[Previous tool_result compacted: used {name}]"),
-        None => COMPACTED_TOOL_RESULT_NOTICE.to_string(),
+    let mut lines = vec![
+        "Conversation summary:".to_string(),
+        "- Previously compacted context:".to_string(),
+    ];
+    lines.extend(summary_detail_lines(existing_summary));
+    lines.push("- Newly compacted context:".to_string());
+    lines.extend(summary_detail_lines(new_summary));
+
+    compress_summary_text(&lines.join("\n"))
+}
+
+fn summary_detail_lines(summary: &str) -> Vec<String> {
+    summary
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| *line != "Summary:" && *line != "Conversation summary:")
+        .map(|line| format!("  {line}"))
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SummaryCompressionBudget {
+    max_chars: usize,
+    max_lines: usize,
+    max_line_chars: usize,
+}
+
+impl Default for SummaryCompressionBudget {
+    fn default() -> Self {
+        Self {
+            max_chars: DEFAULT_SUMMARY_MAX_CHARS,
+            max_lines: DEFAULT_SUMMARY_MAX_LINES,
+            max_line_chars: DEFAULT_SUMMARY_MAX_LINE_CHARS,
+        }
     }
+}
+
+fn compress_summary_text(summary: &str) -> String {
+    compress_summary(summary, SummaryCompressionBudget::default())
+}
+
+fn compress_summary(summary: &str, budget: SummaryCompressionBudget) -> String {
+    let normalized = normalize_summary_lines(summary, budget.max_line_chars);
+    if normalized.is_empty() || budget.max_chars == 0 || budget.max_lines == 0 {
+        return String::new();
+    }
+
+    let selected = select_summary_line_indexes(&normalized, budget);
+    let mut compressed_lines = selected
+        .iter()
+        .map(|index| normalized[*index].clone())
+        .collect::<Vec<_>>();
+    if compressed_lines.is_empty() {
+        compressed_lines.push(truncate_summary_line(&normalized[0], budget.max_chars));
+    }
+
+    let omitted_lines = normalized.len().saturating_sub(compressed_lines.len());
+    if omitted_lines > 0 {
+        push_summary_line_with_budget(
+            &mut compressed_lines,
+            format!("- ... {omitted_lines} additional line(s) omitted."),
+            budget,
+        );
+    }
+
+    compressed_lines.join("\n")
+}
+
+fn normalize_summary_lines(summary: &str, max_line_chars: usize) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut lines = Vec::new();
+
+    for raw_line in summary.lines() {
+        let normalized = collapse_inline_whitespace(raw_line);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        let truncated = truncate_summary_line(&normalized, max_line_chars);
+        if seen.insert(truncated.to_ascii_lowercase()) {
+            lines.push(truncated);
+        }
+    }
+
+    lines
+}
+
+fn select_summary_line_indexes(lines: &[String], budget: SummaryCompressionBudget) -> Vec<usize> {
+    let mut selected = BTreeSet::<usize>::new();
+
+    for priority in 0..=3 {
+        for (index, line) in lines.iter().enumerate() {
+            if selected.contains(&index) || summary_line_priority(line) != priority {
+                continue;
+            }
+
+            let candidate = selected
+                .iter()
+                .map(|selected_index| lines[*selected_index].as_str())
+                .chain(std::iter::once(line.as_str()))
+                .collect::<Vec<_>>();
+
+            if candidate.len() > budget.max_lines {
+                continue;
+            }
+
+            if joined_summary_char_count(&candidate) > budget.max_chars {
+                continue;
+            }
+
+            selected.insert(index);
+        }
+    }
+
+    selected.into_iter().collect()
+}
+
+fn push_summary_line_with_budget(
+    lines: &mut Vec<String>,
+    line: String,
+    budget: SummaryCompressionBudget,
+) {
+    let candidate = lines
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(line.as_str()))
+        .collect::<Vec<_>>();
+
+    if candidate.len() <= budget.max_lines
+        && joined_summary_char_count(&candidate) <= budget.max_chars
+    {
+        lines.push(line);
+    }
+}
+
+fn joined_summary_char_count(lines: &[&str]) -> usize {
+    lines.iter().map(|line| line.chars().count()).sum::<usize>() + lines.len().saturating_sub(1)
+}
+
+fn summary_line_priority(line: &str) -> usize {
+    if line == "Summary:" || line == "Conversation summary:" || is_core_summary_detail(line) {
+        0
+    } else if line.ends_with(':') {
+        1
+    } else if line.starts_with("- ") || line.starts_with("  - ") {
+        2
+    } else {
+        3
+    }
+}
+
+fn is_core_summary_detail(line: &str) -> bool {
+    [
+        "- Scope:",
+        "- Current work:",
+        "- Pending work:",
+        "- Key files referenced:",
+        "- Tools mentioned:",
+        "- Recent user requests:",
+        "- Previously compacted context:",
+        "- Newly compacted context:",
+        "  - Scope:",
+        "  - Current work:",
+        "  - Pending work:",
+        "  - Key files referenced:",
+        "  - Tools mentioned:",
+        "  - Recent user requests:",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+}
+
+fn collapse_inline_whitespace(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_summary_line(line: &str, max_chars: usize) -> String {
+    if max_chars == 0 || line.chars().count() <= max_chars {
+        return line.to_string();
+    }
+
+    if max_chars == 1 {
+        return "...".to_string();
+    }
+
+    let mut truncated = line
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn backup_transcript(messages: &[Value], dir: &str) -> Result<PathBuf> {
@@ -399,7 +604,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn micro_compacts_old_tool_results() {
+    fn micro_compact_keeps_tool_results_unchanged() {
         let mut messages = vec![
             json!({
                 "role": "assistant",
@@ -417,6 +622,7 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "call_1", "content": "x".repeat(200)}),
             json!({"role": "tool", "tool_call_id": "call_2", "content": "y".repeat(200)}),
         ];
+        let original_messages = messages.clone();
 
         let cfg = ContextCompactConfig {
             enabled: true,
@@ -429,17 +635,35 @@ mod tests {
 
         apply_micro_compact(&mut messages, &cfg);
 
-        assert_eq!(
-            messages[1].get("content").and_then(Value::as_str),
-            Some("[Previous tool_result compacted: used grep_search]")
-        );
-        assert_eq!(
-            messages[2]
-                .get("content")
-                .and_then(Value::as_str)
-                .map(|s| s.chars().count()),
-            Some(200)
-        );
+        assert_eq!(messages, original_messages);
+    }
+
+    #[test]
+    fn auto_compact_plan_ignores_large_tool_content_below_overall_threshold() {
+        let messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": { "name": "read_file", "arguments": "{}" }
+                    }
+                ]
+            }),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "x".repeat(10_000)}),
+            json!({"role": "user", "content": "keep"}),
+        ];
+        let cfg = ContextCompactConfig {
+            enabled: true,
+            micro_keep_recent_tool_results: 0,
+            micro_min_tool_result_chars: 1,
+            auto_token_threshold: 100_000,
+            auto_preserve_recent_messages: 2,
+            transcript_dir: ".transcripts".to_string(),
+        };
+
+        assert_eq!(plan_auto_compact(&messages, &cfg), None);
     }
 
     #[test]
@@ -501,6 +725,147 @@ mod tests {
         ];
 
         assert_eq!(adjust_keep_from_to_tool_boundary(&messages, 3), 2);
+    }
+
+    #[test]
+    fn compact_plan_preserves_tool_call_pair_at_tail_boundary() {
+        let messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "old ".repeat(200)}),
+            json!({
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": { "name": "read_file", "arguments": "{}" }
+                    }
+                ]
+            }),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "result ".repeat(200)}),
+            json!({"role": "user", "content": "recent"}),
+        ];
+        let cfg = ContextCompactConfig {
+            enabled: true,
+            micro_keep_recent_tool_results: 3,
+            micro_min_tool_result_chars: 100,
+            auto_token_threshold: 1,
+            auto_preserve_recent_messages: 2,
+            transcript_dir: ".transcripts".to_string(),
+        };
+
+        let plan = plan_auto_compact(&messages, &cfg).expect("plan should compact");
+        assert_eq!(plan.keep_from, 2);
+
+        let compacted = build_messages_after_compaction(&messages, &plan, "summary");
+        assert_eq!(compacted.len(), 4);
+        assert_eq!(
+            compacted[1].get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        assert!(compacted[1].get("tool_calls").is_some());
+        assert_eq!(
+            compacted[2].get("role").and_then(Value::as_str),
+            Some("tool")
+        );
+    }
+
+    #[test]
+    fn compact_plan_skips_existing_summary_when_checking_threshold() {
+        let messages = vec![
+            json!({"role": "system", "content": compact_continuation_message(&"old ".repeat(10_000))}),
+            json!({"role": "user", "content": "tiny"}),
+            json!({"role": "assistant", "content": "small"}),
+        ];
+        let cfg = ContextCompactConfig {
+            enabled: true,
+            micro_keep_recent_tool_results: 3,
+            micro_min_tool_result_chars: 100,
+            auto_token_threshold: 100,
+            auto_preserve_recent_messages: 1,
+            transcript_dir: ".transcripts".to_string(),
+        };
+
+        assert_eq!(plan_auto_compact(&messages, &cfg), None);
+    }
+
+    #[test]
+    fn repeated_compaction_merges_existing_and_new_summary() {
+        let existing =
+            "- Scope: previous interview outline.\n- Current work: discuss module boundaries.";
+        let messages = vec![
+            json!({"role": "system", "content": compact_continuation_message(existing)}),
+            json!({"role": "user", "content": "old question ".repeat(200)}),
+            json!({"role": "assistant", "content": "old answer ".repeat(200)}),
+            json!({"role": "user", "content": "recent"}),
+        ];
+        let cfg = ContextCompactConfig {
+            enabled: true,
+            micro_keep_recent_tool_results: 3,
+            micro_min_tool_result_chars: 100,
+            auto_token_threshold: 1,
+            auto_preserve_recent_messages: 1,
+            transcript_dir: ".transcripts".to_string(),
+        };
+
+        let plan = plan_auto_compact(&messages, &cfg).expect("plan should compact");
+        assert_eq!(plan.compacted_prefix_len, 1);
+        assert_eq!(plan.removed_messages, 2);
+
+        let existing_summary = messages
+            .first()
+            .and_then(extract_existing_compacted_summary);
+        let merged = merge_compact_summaries(
+            existing_summary.as_deref(),
+            "- Scope: new interview content.\n- Tools mentioned: read_file.",
+        );
+        let compacted = build_messages_after_compaction(&messages, &plan, &merged);
+        let content = compacted[0].get("content").and_then(Value::as_str).unwrap();
+
+        assert!(content.contains("- Previously compacted context:"));
+        assert!(content.contains("- Newly compacted context:"));
+        assert!(content.contains("previous interview outline"));
+        assert!(content.contains("new interview content"));
+        assert_eq!(
+            compacted[1].get("content").and_then(Value::as_str),
+            Some("recent")
+        );
+    }
+
+    #[test]
+    fn summary_compression_dedupes_and_keeps_core_details() {
+        let summary = [
+            "Conversation summary:",
+            "- Scope:   compact   earlier   messages.",
+            "- Scope: compact earlier messages.",
+            "- Current work: finish summary compression.",
+            "- Key files referenced: src/compact.rs.",
+            "- Tools mentioned: read_file, grep_search.",
+            "- Key timeline:",
+            "  - user: asked for a working implementation.",
+            "  - assistant: inspected runtime compaction flow.",
+        ]
+        .join("\n");
+
+        let compressed = compress_summary(
+            &summary,
+            SummaryCompressionBudget {
+                max_chars: 260,
+                max_lines: 6,
+                max_line_chars: 80,
+            },
+        );
+
+        assert!(compressed.contains("Conversation summary:"));
+        assert!(compressed.contains("- Scope: compact earlier messages."));
+        assert_eq!(
+            compressed
+                .matches("- Scope: compact earlier messages.")
+                .count(),
+            1
+        );
+        assert!(compressed.contains("- Current work: finish summary compression."));
+        assert!(compressed.contains("- Key files referenced: src/compact.rs."));
+        assert!(compressed.contains("- Tools mentioned: read_file, grep_search."));
     }
 
     #[test]

@@ -31,23 +31,6 @@ pub struct ConversationSession {
 }
 
 impl ConversationSession {
-    pub fn new(
-        agent_kind: AgentKind,
-        initial_prompt: String,
-        system_prompt: &str,
-        transcript_dir: &str,
-    ) -> Result<Self> {
-        Self::new_with_messages(
-            agent_kind,
-            vec![
-                json!({"role": "system", "content": system_prompt}),
-                json!({"role": "user", "content": initial_prompt.clone()}),
-            ],
-            vec![initial_prompt],
-            transcript_dir,
-        )
-    }
-
     pub fn new_empty(
         agent_kind: AgentKind,
         system_prompt: &str,
@@ -207,10 +190,14 @@ mod tests {
     #[test]
     fn new_session_uses_agent_specific_path() {
         let dir = unique_transcript_dir();
-        let session = ConversationSession::new(
+        let session = ConversationSession::new_with_session_id(
             AgentKind::ProgrammerInterview,
-            "hello".to_string(),
-            "system",
+            "session_path_test".to_string(),
+            vec![
+                json!({"role": "system", "content": "system"}),
+                json!({"role": "user", "content": "hello"}),
+            ],
+            vec!["hello".to_string()],
             dir.to_str().unwrap(),
         )
         .expect("create session");
