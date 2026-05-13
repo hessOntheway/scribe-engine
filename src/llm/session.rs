@@ -142,6 +142,13 @@ impl ConversationSession {
             now_unix_ms().unwrap_or(self.snapshot.updated_at_unix_ms);
     }
 
+    pub fn truncate_to(&mut self, message_count: usize, prompt_history_count: usize) {
+        self.snapshot.messages.truncate(message_count);
+        self.snapshot.prompt_history.truncate(prompt_history_count);
+        self.snapshot.updated_at_unix_ms =
+            now_unix_ms().unwrap_or(self.snapshot.updated_at_unix_ms);
+    }
+
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.session_path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -251,5 +258,31 @@ mod tests {
 
         let saved = read_to_string(path).expect("read old session");
         assert!(saved.contains("session_old"));
+    }
+
+    #[test]
+    fn truncate_to_removes_cancelled_turn_messages_and_prompts() {
+        let dir = unique_transcript_dir();
+        let mut session = ConversationSession::new_empty(
+            AgentKind::InterviewMaterials,
+            "system",
+            dir.to_str().unwrap(),
+        )
+        .expect("create session");
+        let message_count = session.snapshot().messages.len();
+        let prompt_count = session.snapshot().prompt_history.len();
+
+        session.append_user_prompt("typo prompt".to_string());
+        session
+            .messages_and_prompt_cache_stats_mut()
+            .0
+            .push(json!({"role": "assistant", "content": "partial answer"}));
+        session.truncate_to(message_count, prompt_count);
+
+        assert_eq!(session.snapshot().messages.len(), message_count);
+        assert_eq!(session.snapshot().prompt_history.len(), prompt_count);
+        assert!(session.snapshot().messages.iter().all(|message| {
+            message.get("content").and_then(Value::as_str) != Some("partial answer")
+        }));
     }
 }

@@ -24,7 +24,7 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::ask::AskApp;
 use crate::llm::session::{ConversationSession, ConversationSessionSnapshot};
-use crate::runtime::{RuntimeEvent, RuntimeEventSink};
+use crate::runtime::{CancellationToken, RuntimeEvent, RuntimeEventSink};
 
 static TURN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -226,6 +226,22 @@ impl LiveEvent {
             error: Some(error),
         }
     }
+
+    fn turn_cancelled(
+        agent_kind: AgentKind,
+        snapshot: LiveSnapshot,
+        workflow: Option<WorkflowSnapshot>,
+    ) -> Self {
+        Self {
+            event_type: "turn_cancelled".to_string(),
+            agent_kind,
+            snapshot: Some(snapshot),
+            response: None,
+            message: None,
+            workflow,
+            error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,7 +302,19 @@ struct StartedTurn {
     session: ConversationSession,
     session_id: String,
     turn_id: u64,
+    cancellation: CancellationToken,
     response: LiveSubmitResponse,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveTurn {
+    session_id: String,
+    turn_id: u64,
+    cancellation: CancellationToken,
+    rollback_message_count: usize,
+    rollback_prompt_history_count: usize,
+    rollback_ui_message_count: usize,
+    rollback_next_message_index: usize,
 }
 
 struct LiveConversationInner {
@@ -298,6 +326,7 @@ struct LiveConversationInner {
     next_trace_index: usize,
     status: LiveStatus,
     last_error: Option<String>,
+    active_turn: Option<ActiveTurn>,
 }
 
 struct LiveConversationManager {
@@ -389,6 +418,7 @@ impl LiveConversationManager {
                 ui_messages,
                 status,
                 last_error,
+                active_turn: None,
             })),
             event_tx: broadcast::channel(512).0,
         };
@@ -496,6 +526,7 @@ impl LiveConversationManager {
                     inner.ui_messages = Vec::new();
                     inner.status = LiveStatus::Idle;
                     inner.last_error = None;
+                    inner.active_turn = None;
                     self.snapshot_from_inner(&inner)
                 };
                 self.persist_snapshot_value(&persisted)
@@ -543,6 +574,7 @@ impl LiveConversationManager {
             inner.ui_messages = ui_messages;
             inner.status = status;
             inner.last_error = last_error;
+            inner.active_turn = None;
             self.snapshot_from_inner(&inner)
         };
 
@@ -590,6 +622,7 @@ impl LiveConversationManager {
             inner.ui_messages = ui_messages;
             inner.status = status;
             inner.last_error = last_error;
+            inner.active_turn = None;
             self.snapshot_from_inner(&inner)
         };
 
@@ -604,6 +637,7 @@ impl LiveConversationManager {
     }
     fn start_turn(&self, prompt: String, turn_id: u64) -> Result<StartedTurn, AppError> {
         let mut new_messages = Vec::new();
+        let cancellation = CancellationToken::new();
 
         let (session, session_id) = {
             let mut inner = self.inner.lock().map_err(|_| {
@@ -619,21 +653,33 @@ impl LiveConversationManager {
             inner.status = LiveStatus::Thinking;
             inner.last_error = None;
 
-            let session = match inner.session.take() {
-                Some(mut session) => {
-                    session.append_user_prompt(prompt.clone());
-                    session.save().map_err(AppError::internal)?;
-                    session
-                }
+            let mut session = match inner.session.take() {
+                Some(session) => session,
                 None => self
                     .ask_app
-                    .new_session(self.agent_kind, prompt.clone())
+                    .new_empty_session(self.agent_kind)
                     .map_err(AppError::internal)?,
             };
+            let rollback_message_count = session.snapshot().messages.len();
+            let rollback_prompt_history_count = session.snapshot().prompt_history.len();
+            let rollback_ui_message_count = inner.ui_messages.len();
+            let rollback_next_message_index = inner.next_message_index;
+
+            session.append_user_prompt(prompt.clone());
+            session.save().map_err(AppError::internal)?;
 
             let snapshot = session.snapshot().clone();
             inner.title = summary_title(&snapshot);
             inner.session_id = Some(snapshot.session_id.clone());
+            inner.active_turn = Some(ActiveTurn {
+                session_id: snapshot.session_id.clone(),
+                turn_id,
+                cancellation: cancellation.clone(),
+                rollback_message_count,
+                rollback_prompt_history_count,
+                rollback_ui_message_count,
+                rollback_next_message_index,
+            });
 
             if !is_internal_seed_message(&prompt) {
                 let user_message = base_ui_message(
@@ -670,6 +716,7 @@ impl LiveConversationManager {
             session,
             session_id: session_id.clone(),
             turn_id,
+            cancellation,
             response: LiveSubmitResponse {
                 agent_kind: self.agent_kind,
                 title: self
@@ -716,9 +763,15 @@ impl LiveConversationManager {
             self.agent_kind,
             &mut started.session,
             Some(observer),
+            Some(started.cancellation.clone()),
         );
 
         if let Err(error) = runtime_result {
+            if started.cancellation.is_cancelled()
+                || !self.is_active_turn(&started.session_id, started.turn_id)?
+            {
+                return Ok(());
+            }
             let _ = started.session.save();
             let error_text = error.to_string();
             self.finish_turn(started, Some(error_text), None)?;
@@ -734,11 +787,14 @@ impl LiveConversationManager {
         session_id: &str,
         turn_id: u64,
         pending: PendingUiMessage,
-    ) -> Result<UiMessage, AppError> {
+    ) -> Result<Option<UiMessage>, AppError> {
         let ui_message = {
             let mut inner = self.inner.lock().map_err(|_| {
                 AppError::internal(anyhow!("failed to lock live conversation state"))
             })?;
+            if !active_turn_matches(&inner, session_id, turn_id) {
+                return Ok(None);
+            }
             let ui_message = base_ui_message(
                 session_id,
                 inner.next_message_index,
@@ -763,7 +819,7 @@ impl LiveConversationManager {
             self.agent_kind,
             ui_message.clone(),
         ));
-        Ok(ui_message)
+        Ok(Some(ui_message))
     }
 
     fn append_trace_message(
@@ -771,11 +827,14 @@ impl LiveConversationManager {
         session_id: &str,
         turn_id: u64,
         pending: PendingUiMessage,
-    ) -> Result<UiMessage, AppError> {
+    ) -> Result<Option<UiMessage>, AppError> {
         let ui_message = {
             let mut inner = self.inner.lock().map_err(|_| {
                 AppError::internal(anyhow!("failed to lock live conversation state"))
             })?;
+            if !active_turn_matches(&inner, session_id, turn_id) {
+                return Ok(None);
+            }
             let ui_message = base_trace_message(
                 session_id,
                 inner.next_trace_index,
@@ -803,7 +862,7 @@ impl LiveConversationManager {
             self.agent_kind,
             public_trace_message(&ui_message),
         ));
-        Ok(ui_message)
+        Ok(Some(ui_message))
     }
 
     fn finish_turn(
@@ -811,7 +870,7 @@ impl LiveConversationManager {
         started: StartedTurn,
         error_text: Option<String>,
         on_complete: Option<TurnCompletionHandler>,
-    ) -> Result<LiveSubmitResponse, AppError> {
+    ) -> Result<Option<LiveSubmitResponse>, AppError> {
         let snapshot = started.session.snapshot().clone();
         let turn_key = format!("{}-turn-{}", started.session_id, started.turn_id);
         let response = {
@@ -819,9 +878,14 @@ impl LiveConversationManager {
                 AppError::internal(anyhow!("failed to lock live conversation state"))
             })?;
 
+            if !active_turn_matches(&inner, &started.session_id, started.turn_id) {
+                return Ok(None);
+            }
+
             inner.title = summary_title(&snapshot);
             inner.session_id = Some(snapshot.session_id.clone());
             inner.session = Some(started.session);
+            inner.active_turn = None;
             if let Some(error_text) = error_text.clone() {
                 inner.status = LiveStatus::Error;
                 inner.last_error = Some(error_text);
@@ -858,7 +922,66 @@ impl LiveConversationManager {
             self.broadcast(LiveEvent::turn_finished(response.clone(), workflow));
         }
 
-        Ok(response)
+        Ok(Some(response))
+    }
+
+    fn is_active_turn(&self, session_id: &str, turn_id: u64) -> Result<bool, AppError> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| AppError::internal(anyhow!("failed to lock live conversation state")))?;
+        Ok(active_turn_matches(&inner, session_id, turn_id))
+    }
+
+    fn cancel_turn(&self) -> Result<LiveSnapshot, AppError> {
+        let active = {
+            let inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+            inner
+                .active_turn
+                .clone()
+                .ok_or_else(|| AppError::conflict("no active turn to cancel"))?
+        };
+
+        active.cancellation.cancel();
+
+        let mut session = self
+            .ask_app
+            .load_session(self.agent_kind, &active.session_id)
+            .map_err(AppError::internal)?;
+        session.truncate_to(
+            active.rollback_message_count,
+            active.rollback_prompt_history_count,
+        );
+        session.save().map_err(AppError::internal)?;
+        let snapshot = session.snapshot().clone();
+
+        let persisted = {
+            let mut inner = self.inner.lock().map_err(|_| {
+                AppError::internal(anyhow!("failed to lock live conversation state"))
+            })?;
+
+            if !active_turn_identity_matches(&inner, &active.session_id, active.turn_id) {
+                return Ok(self.snapshot_from_inner(&inner));
+            }
+
+            inner.ui_messages.truncate(active.rollback_ui_message_count);
+            inner.next_message_index = active.rollback_next_message_index;
+            inner.title = summary_title(&snapshot);
+            inner.session_id = Some(snapshot.session_id.clone());
+            inner.session = Some(session);
+            inner.status = LiveStatus::WaitingForInput;
+            inner.last_error = None;
+            inner.active_turn = None;
+
+            let persisted = self.snapshot_from_inner(&inner);
+            self.persist_snapshot_value(&persisted)
+                .map_err(AppError::internal)?;
+            persisted
+        };
+
+        Ok(persisted)
     }
 
     fn snapshot_from_inner(&self, inner: &LiveConversationInner) -> LiveSnapshot {
@@ -900,11 +1023,31 @@ impl LiveConversationManager {
         inner.session = Some(session);
         inner.status = LiveStatus::WaitingForInput;
         inner.last_error = None;
+        inner.active_turn = None;
         let persisted = self.snapshot_from_inner(&inner);
         self.persist_snapshot_value(&persisted)?;
         self.broadcast(LiveEvent::snapshot(self.agent_kind, persisted, None));
         Ok(())
     }
+}
+
+fn active_turn_matches(inner: &LiveConversationInner, session_id: &str, turn_id: u64) -> bool {
+    active_turn_identity_matches(inner, session_id, turn_id)
+        && inner
+            .active_turn
+            .as_ref()
+            .is_some_and(|active| !active.cancellation.is_cancelled())
+}
+
+fn active_turn_identity_matches(
+    inner: &LiveConversationInner,
+    session_id: &str,
+    turn_id: u64,
+) -> bool {
+    inner
+        .active_turn
+        .as_ref()
+        .is_some_and(|active| active.session_id == session_id && active.turn_id == turn_id)
 }
 
 struct WorkflowManager {
@@ -1250,6 +1393,26 @@ impl WorkflowManager {
         Ok(response)
     }
 
+    fn cancel_agent_turn(&self, agent_kind: AgentKind) -> Result<LiveSnapshot, AppError> {
+        let live = self.live_for(agent_kind);
+        let snapshot = live.cancel_turn()?;
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| AppError::internal(anyhow!("failed to lock workflow state")))?;
+            inner.active_agent = agent_kind;
+        }
+        self.persist_workflow().map_err(AppError::internal)?;
+        let workflow = self.snapshot().map_err(AppError::internal)?;
+        live.broadcast(LiveEvent::turn_cancelled(
+            agent_kind,
+            snapshot.clone(),
+            Some(workflow),
+        ));
+        Ok(snapshot)
+    }
+
     fn start_interview(self: &Arc<Self>) -> Result<LiveSnapshot, AppError> {
         let session_id = self
             .materials_live
@@ -1367,6 +1530,10 @@ pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
         .route(
             "/api/agents/{agent_kind}/sessions/{session_id}/trace/{turn_id}",
             get(get_agent_turn_trace),
+        )
+        .route(
+            "/api/agents/{agent_kind}/turn/cancel",
+            post(post_agent_turn_cancel),
         )
         .route("/api/interview/start", post(post_interview_start))
         .route("/api/interview/finish", post(post_interview_finish))
@@ -1499,6 +1666,15 @@ async fn get_agent_turn_trace(
     Ok(Json(
         load_trace_messages(&path).map_err(AppError::internal)?,
     ))
+}
+
+async fn post_agent_turn_cancel(
+    State(state): State<WebState>,
+    AxumPath(agent_kind): AxumPath<String>,
+) -> Result<Json<LiveSnapshot>, AppError> {
+    let agent_kind = parse_agent_kind(&agent_kind)?;
+    let snapshot = state.workflow.cancel_agent_turn(agent_kind)?;
+    Ok(Json(snapshot))
 }
 
 async fn post_interview_start(

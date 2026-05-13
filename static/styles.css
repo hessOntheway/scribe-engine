@@ -648,7 +648,8 @@ textarea {
   line-height: 1.55;
 }
 
-.primary-button {
+.primary-button,
+.stop-button {
   border: 1px solid rgba(108, 182, 255, 0.28);
   border-radius: 999px;
   background: linear-gradient(180deg, rgba(108, 182, 255, 0.16), rgba(49, 130, 206, 0.3));
@@ -659,18 +660,31 @@ textarea {
   transition: transform 160ms ease, border-color 160ms ease;
 }
 
-.primary-button:hover {
+.stop-button {
+  border-color: rgba(248, 113, 113, 0.34);
+  background: rgba(248, 113, 113, 0.12);
+  color: #fecaca;
+}
+
+.primary-button:hover,
+.stop-button:hover {
   transform: translateY(-1px);
   border-color: rgba(108, 182, 255, 0.52);
 }
 
-.primary-button:disabled {
+.stop-button:hover {
+  border-color: rgba(248, 113, 113, 0.62);
+}
+
+.primary-button:disabled,
+.stop-button:disabled {
   cursor: wait;
   opacity: 0.72;
 }
 
 textarea:focus,
 .primary-button:focus,
+.stop-button:focus,
 .inline-button:focus,
 .session-card:focus,
 .trace-toggle summary:focus {

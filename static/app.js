@@ -55,6 +55,7 @@ const nodes = {
   composerLabel: document.querySelector("#composer-label"),
   composerHelp: document.querySelector("#composer-help"),
   sendButton: document.querySelector("#send-button"),
+  cancelTurnButton: document.querySelector("#cancel-turn-button"),
   newSessionButton: document.querySelector("#new-session-button"),
   materialsAgentButton: document.querySelector("#materials-agent-button"),
   interviewAgentButton: document.querySelector("#interview-agent-button"),
@@ -75,6 +76,7 @@ async function bootstrap() {
 
 function bindEvents() {
   nodes.sendButton.addEventListener("click", onSend);
+  nodes.cancelTurnButton.addEventListener("click", onCancelTurn);
   nodes.newSessionButton.addEventListener("click", onNewSession);
   nodes.materialsAgentButton.addEventListener("click", () => switchAgent("interview_materials"));
   nodes.interviewAgentButton.addEventListener("click", () => switchAgent("programmer_interview"));
@@ -82,7 +84,7 @@ function bindEvents() {
   nodes.finishInterviewButton.addEventListener("click", onFinishInterview);
   nodes.viewReportButton.addEventListener("click", onViewReport);
   nodes.promptInput.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       onSend();
     }
@@ -112,7 +114,7 @@ function connectEvents() {
     render();
   };
 
-  for (const eventType of ["snapshot", "turn_started", "message_added", "trace_added", "turn_finished", "turn_failed", "workflow_updated"]) {
+  for (const eventType of ["snapshot", "turn_started", "message_added", "trace_added", "turn_finished", "turn_failed", "turn_cancelled", "workflow_updated"]) {
     source.addEventListener(eventType, handleLiveEvent);
   }
 }
@@ -174,6 +176,13 @@ function applyLiveEvent(payload) {
     state.liveTrace = [];
     state.status = "error";
     state.lastError = payload.error || payload.response?.last_error || "Agent turn failed";
+    refreshAfterTurn();
+  }
+
+  if (payload.type === "turn_cancelled") {
+    state.isRunning = false;
+    state.status = payload.snapshot?.status || "waiting_for_input";
+    state.lastError = "";
     refreshAfterTurn();
   }
 }
@@ -239,6 +248,24 @@ async function onSend() {
     if (!accepted) {
       state.isRunning = false;
     }
+    render();
+  }
+}
+
+async function onCancelTurn() {
+  if (!state.isRunning && state.status !== "thinking") {
+    return;
+  }
+
+  state.lastError = "";
+  try {
+    const snapshot = await requestJson(`/api/agents/${state.activeAgent}/turn/cancel`, {
+      method: "POST",
+    });
+    applySnapshot(snapshot);
+    await refreshAfterTurn();
+  } catch (error) {
+    state.lastError = error instanceof Error ? error.message : String(error);
     render();
   }
 }
@@ -483,6 +510,7 @@ function renderHeaderState() {
   nodes.headerStatus.textContent = describeStatus();
 
   nodes.sendButton.disabled = isBusy;
+  nodes.cancelTurnButton.disabled = !isBusy;
   nodes.promptInput.disabled = isBusy;
   nodes.newSessionButton.disabled = isBusy;
   nodes.startInterviewButton.disabled = isBusy || !state.workflow?.materials?.exists;

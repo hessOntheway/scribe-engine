@@ -7,7 +7,7 @@ use crate::agents::AgentKind;
 use crate::config::LlmConfig;
 use crate::llm::openai::OpenAiCompatClient;
 use crate::llm::session::{ConversationSession, ConversationSessionSnapshot};
-use crate::runtime::{AgentLoop, ConversationRuntime, RuntimeEventSink};
+use crate::runtime::{AgentLoop, CancellationToken, ConversationRuntime, RuntimeEventSink};
 use crate::tools::task::{task_handler, task_query_handlers};
 use crate::tools::{GlobalToolRegistry, TaskRegistry, TeamManager, team_tool_handlers};
 
@@ -89,21 +89,6 @@ impl AskApp {
         ))
     }
 
-    pub fn new_session(
-        &self,
-        agent_kind: AgentKind,
-        initial_prompt: String,
-    ) -> Result<ConversationSession> {
-        let session = ConversationSession::new(
-            agent_kind,
-            initial_prompt,
-            agent_kind.system_prompt(),
-            &self.transcript_dir,
-        )?;
-        session.save()?;
-        Ok(session)
-    }
-
     pub fn new_empty_session(&self, agent_kind: AgentKind) -> Result<ConversationSession> {
         let session = ConversationSession::new_empty(
             agent_kind,
@@ -144,12 +129,13 @@ impl AskApp {
         agent_kind: AgentKind,
         session: &mut ConversationSession,
         event_sink: Option<RuntimeEventSink>,
+        cancellation: Option<CancellationToken>,
     ) -> Result<String> {
         let runtime = match agent_kind {
             AgentKind::InterviewMaterials => &self.materials_runtime,
             AgentKind::ProgrammerInterview => &self.interviewer_runtime,
         };
-        let answer = runtime.run_session_turn_with_events(session, event_sink)?;
+        let answer = runtime.run_session_turn_with_events(session, event_sink, cancellation)?;
         session.save()?;
         Ok(answer)
     }

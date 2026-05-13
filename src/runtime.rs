@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact::{apply_micro_compact, auto_compact_if_needed, remove_orphan_tool_messages};
@@ -12,6 +12,25 @@ use crate::tools::GlobalToolRegistry;
 static SUBAGENT_AUDIT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub type RuntimeEventSink = Arc<dyn Fn(RuntimeEvent) + Send + Sync>;
+
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
@@ -49,6 +68,7 @@ impl AgentLoop {
         session: &mut ConversationSession,
         tool_registry: &GlobalToolRegistry,
         event_sink: Option<RuntimeEventSink>,
+        cancellation: Option<CancellationToken>,
     ) -> Result<String> {
         let (messages, prompt_cache_stats) = session.messages_and_prompt_cache_stats_mut();
         self.run_message_loop(
@@ -57,6 +77,7 @@ impl AgentLoop {
             None,
             Some(prompt_cache_stats),
             event_sink,
+            cancellation,
         )
     }
 
@@ -82,6 +103,7 @@ impl AgentLoop {
             audit_path.as_deref(),
             None,
             None,
+            None,
         )
     }
 
@@ -92,6 +114,7 @@ impl AgentLoop {
         audit_log_path_override: Option<&str>,
         prompt_cache_stats: Option<&mut PromptCacheStats>,
         event_sink: Option<RuntimeEventSink>,
+        cancellation: Option<CancellationToken>,
     ) -> Result<String> {
         if self.max_steps == 0 {
             bail!("max_steps must be greater than 0");
@@ -102,6 +125,7 @@ impl AgentLoop {
         let mut prompt_cache_stats = prompt_cache_stats;
 
         for _ in 0..self.max_steps {
+            ensure_not_cancelled(cancellation.as_ref())?;
             let removed_orphan_tools = remove_orphan_tool_messages(messages);
             if removed_orphan_tools > 0 {
                 eprintln!(
@@ -144,6 +168,7 @@ impl AgentLoop {
                 &tool_definitions,
                 audit_log_path_override,
             )?;
+            ensure_not_cancelled(cancellation.as_ref())?;
 
             if let Some(stats) = prompt_cache_stats.as_mut() {
                 if assistant.cached {
@@ -158,6 +183,7 @@ impl AgentLoop {
             if let Some(sink) = &event_sink {
                 sink(RuntimeEvent::AssistantMessage(assistant.message.clone()));
             }
+            ensure_not_cancelled(cancellation.as_ref())?;
 
             let tool_calls = assistant
                 .message
@@ -182,6 +208,7 @@ impl AgentLoop {
             }
 
             for call in tool_calls {
+                ensure_not_cancelled(cancellation.as_ref())?;
                 let tool_id = call
                     .get("id")
                     .and_then(|v| v.as_str())
@@ -211,6 +238,7 @@ impl AgentLoop {
                     Ok(output) => output,
                     Err(err) => format!("tool_error: {}", err),
                 };
+                ensure_not_cancelled(cancellation.as_ref())?;
 
                 if let Some(sink) = &event_sink {
                     sink(RuntimeEvent::ToolResult {
@@ -234,6 +262,13 @@ impl AgentLoop {
             self.max_steps
         )
     }
+}
+
+fn ensure_not_cancelled(cancellation: Option<&CancellationToken>) -> Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        bail!("agent turn cancelled");
+    }
+    Ok(())
 }
 
 fn next_subagent_audit_id() -> String {
@@ -266,11 +301,39 @@ impl ConversationRuntime {
         &self,
         session: &mut ConversationSession,
         event_sink: Option<RuntimeEventSink>,
+        cancellation: Option<CancellationToken>,
     ) -> Result<String> {
         self.agent_loop.run_session_turn_with_events(
             session,
             self.tool_registry.as_ref(),
             event_sink,
+            cancellation,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_token_is_shared_between_clones() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+
+        assert!(!token.is_cancelled());
+        clone.cancel();
+
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn ensure_not_cancelled_rejects_cancelled_token() {
+        let token = CancellationToken::new();
+        assert!(ensure_not_cancelled(Some(&token)).is_ok());
+
+        token.cancel();
+
+        assert!(ensure_not_cancelled(Some(&token)).is_err());
     }
 }
