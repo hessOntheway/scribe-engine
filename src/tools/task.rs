@@ -331,7 +331,7 @@ fn task_get_handler(task_registry: Arc<TaskRegistry>) -> ToolHandler {
         }
 
         let Some(record) = task_registry.get(task_id) else {
-            return Ok(task_not_found_json(task_id)?);
+            return task_not_found_json(task_id);
         };
 
         serde_json::to_string_pretty(&json!({
@@ -373,10 +373,10 @@ fn task_list_handler(task_registry: Arc<TaskRegistry>) -> ToolHandler {
         let input: TaskListInput =
             serde_json::from_str(input_json).context("invalid input JSON for task_list")?;
 
-        if let Some(limit) = input.limit {
-            if limit == 0 || limit > 200 {
-                bail!("limit must be between 1 and 200");
-            }
+        if let Some(limit) = input.limit
+            && (limit == 0 || limit > 200)
+        {
+            bail!("limit must be between 1 and 200");
         }
 
         let status_filters = parse_status_filters(&input.status);
@@ -433,7 +433,7 @@ fn task_output_handler(task_registry: Arc<TaskRegistry>) -> ToolHandler {
         }
 
         let Some(record) = task_registry.get(task_id) else {
-            return Ok(task_not_found_json(task_id)?);
+            return task_not_found_json(task_id);
         };
 
         serde_json::to_string_pretty(&json!({

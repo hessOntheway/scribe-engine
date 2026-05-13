@@ -58,6 +58,29 @@ struct WorkerHandle {
     shutdown: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
+struct TeamRuntimeDeps {
+    agent_loop: Arc<AgentLoop>,
+    child_registry: Arc<GlobalToolRegistry>,
+    task_registry: Arc<TaskRegistry>,
+}
+
+struct SpawnTeammateRequest {
+    name: String,
+    role: String,
+    prompt: String,
+    task_id: Option<String>,
+    validation_mode: TaskBindingMode,
+}
+
+struct WorkerLoopRequest {
+    name: String,
+    role: String,
+    initial_prompt: String,
+    task_id: Option<String>,
+    shutdown: Arc<AtomicBool>,
+}
+
 #[derive(Debug)]
 pub struct TeamManager {
     team_dir: PathBuf,
@@ -199,25 +222,23 @@ impl TeamManager {
         Ok(workers.keys().cloned().collect())
     }
 
-    pub fn spawn_teammate(
+    fn spawn_teammate(
         self: &Arc<Self>,
-        name: &str,
-        role: &str,
-        prompt: &str,
-        task_id: Option<&str>,
-        validation_mode: TaskBindingMode,
-        agent_loop: Arc<AgentLoop>,
-        child_registry: Arc<GlobalToolRegistry>,
-        task_registry: Arc<TaskRegistry>,
+        request: SpawnTeammateRequest,
+        deps: TeamRuntimeDeps,
     ) -> Result<String> {
-        let name = normalize_member_name(name)?;
-        let role = role.trim();
+        let name = normalize_member_name(&request.name)?;
+        let role = request.role.trim();
         if role.is_empty() {
             bail!("teammate role cannot be empty");
         }
 
-        let (bound_task_id, binding_note) =
-            resolve_task_binding(task_registry.as_ref(), &name, task_id, validation_mode)?;
+        let (bound_task_id, binding_note) = resolve_task_binding(
+            deps.task_registry.as_ref(),
+            &name,
+            request.task_id.as_deref(),
+            request.validation_mode,
+        )?;
 
         {
             let mut workers = self
@@ -253,20 +274,17 @@ impl TeamManager {
             let manager = Arc::clone(self);
             let worker_name = name.clone();
             let worker_role = role.to_string();
-            let worker_prompt = prompt.trim().to_string();
             let worker_task_id = bound_task_id.clone();
 
             thread::spawn(move || {
-                if let Err(err) = manager.worker_loop(
-                    &worker_name,
-                    &worker_role,
-                    &worker_prompt,
-                    worker_task_id.as_deref(),
-                    agent_loop,
-                    child_registry,
-                    task_registry,
+                let worker = WorkerLoopRequest {
+                    name: worker_name.clone(),
+                    role: worker_role,
+                    initial_prompt: request.prompt.trim().to_string(),
+                    task_id: worker_task_id,
                     shutdown,
-                ) {
+                };
+                if let Err(err) = manager.worker_loop(worker, deps) {
                     let _ = manager.update_member_status(&worker_name, MemberStatus::Idle);
                     let _ = manager.send(
                         "system",
@@ -354,23 +372,13 @@ impl TeamManager {
     fn team_huddle_json(
         self: &Arc<Self>,
         members: &[TeamHuddleMember],
-        agent_loop: Arc<AgentLoop>,
-        child_registry: Arc<GlobalToolRegistry>,
-        task_registry: Arc<TaskRegistry>,
+        deps: TeamRuntimeDeps,
         wait_ms: u64,
     ) -> Result<String> {
         let mut spawned = Vec::new();
         for member in members {
-            let result = self.spawn_teammate(
-                &member.name,
-                &member.role,
-                &member.prompt,
-                member.task_id.as_deref(),
-                member.validation_mode,
-                Arc::clone(&agent_loop),
-                Arc::clone(&child_registry),
-                Arc::clone(&task_registry),
-            )?;
+            let result =
+                self.spawn_teammate(spawn_request_from_huddle_member(member), deps.clone())?;
             spawned.push(result);
         }
 
@@ -380,7 +388,7 @@ impl TeamManager {
         )?;
 
         let lead_messages = self.drain_inbox("lead")?;
-        let status = self.status_json(Some(task_registry.as_ref()))?;
+        let status = self.status_json(Some(deps.task_registry.as_ref()))?;
 
         serde_json::to_string_pretty(&json!({
             "spawned": spawned,
@@ -390,17 +398,16 @@ impl TeamManager {
         .context("failed to encode team huddle result")
     }
 
-    fn worker_loop(
-        &self,
-        name: &str,
-        role: &str,
-        initial_prompt: &str,
-        task_id: Option<&str>,
-        agent_loop: Arc<AgentLoop>,
-        child_registry: Arc<GlobalToolRegistry>,
-        task_registry: Arc<TaskRegistry>,
-        shutdown: Arc<AtomicBool>,
-    ) -> Result<()> {
+    fn worker_loop(&self, request: WorkerLoopRequest, deps: TeamRuntimeDeps) -> Result<()> {
+        let WorkerLoopRequest {
+            name,
+            role,
+            initial_prompt,
+            task_id,
+            shutdown,
+        } = request;
+        let task_id = task_id.as_deref();
+
         self.send(
             "system",
             "lead",
@@ -408,7 +415,7 @@ impl TeamManager {
         )?;
 
         if !initial_prompt.trim().is_empty() {
-            let task_context = render_task_context(task_registry.as_ref(), task_id);
+            let task_context = render_task_context(deps.task_registry.as_ref(), task_id);
             let prompt = format!(
                 "{}\n{}\n\n{}\n\nYou are teammate '{}' with role '{}'. Initial assignment:\n{}",
                 TEAM_TODO_COORDINATION_CONTRACT,
@@ -418,11 +425,14 @@ impl TeamManager {
                 role,
                 initial_prompt.trim()
             );
-            let output = match agent_loop.run_subagent(&prompt, child_registry.as_ref()) {
+            let output = match deps
+                .agent_loop
+                .run_subagent(&prompt, deps.child_registry.as_ref())
+            {
                 Ok(text) => text,
                 Err(err) => {
                     if let Some(task_id) = task_id {
-                        let _ = task_registry.fail_task(task_id, &err.to_string());
+                        let _ = deps.task_registry.fail_task(task_id, &err.to_string());
                     }
                     return Err(err).with_context(|| {
                         format!("initial assignment failed for teammate '{}'", name)
@@ -432,18 +442,18 @@ impl TeamManager {
 
             if let Some(task_id) = task_id {
                 let preview = truncate_preview(&output);
-                task_registry
+                deps.task_registry
                     .complete_task(task_id, &preview)
                     .with_context(|| format!("failed to mark task '{}' completed", task_id))?;
             }
-            self.send(name, "lead", &output)?;
+            self.send(&name, "lead", &output)?;
         }
 
-        self.update_member_status(name, MemberStatus::Idle)?;
+        self.update_member_status(&name, MemberStatus::Idle)?;
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
-                self.update_member_status(name, MemberStatus::Shutdown)?;
+                self.update_member_status(&name, MemberStatus::Shutdown)?;
                 self.send(
                     "system",
                     "lead",
@@ -452,20 +462,20 @@ impl TeamManager {
                 break;
             }
 
-            let messages = self.drain_inbox(name)?;
+            let messages = self.drain_inbox(&name)?;
             if messages.is_empty() {
                 thread::sleep(Duration::from_millis(TEAM_LOOP_IDLE_MS));
                 continue;
             }
 
-            self.update_member_status(name, MemberStatus::Working)?;
+            self.update_member_status(&name, MemberStatus::Working)?;
 
             let mut inbox_text = String::new();
             for msg in messages {
                 inbox_text.push_str(&format!("from {}: {}\n", msg.from, msg.content));
             }
 
-            let task_context = render_task_context(task_registry.as_ref(), task_id);
+            let task_context = render_task_context(deps.task_registry.as_ref(), task_id);
             let prompt = format!(
                 "{}\n{}\n\n{}\n\nYou are teammate '{}' with role '{}'. Handle the inbox items below and return a concise, actionable response.\n\n{}",
                 TEAM_TODO_COORDINATION_CONTRACT,
@@ -476,24 +486,27 @@ impl TeamManager {
                 inbox_text
             );
 
-            let output = match agent_loop.run_subagent(&prompt, child_registry.as_ref()) {
+            let output = match deps
+                .agent_loop
+                .run_subagent(&prompt, deps.child_registry.as_ref())
+            {
                 Ok(text) => {
                     if let Some(task_id) = task_id {
                         let preview = truncate_preview(&text);
-                        let _ = task_registry.complete_task(task_id, &preview);
+                        let _ = deps.task_registry.complete_task(task_id, &preview);
                     }
                     text
                 }
                 Err(err) => {
                     if let Some(task_id) = task_id {
-                        let _ = task_registry.fail_task(task_id, &err.to_string());
+                        let _ = deps.task_registry.fail_task(task_id, &err.to_string());
                     }
                     format!("teammate '{}' failed to handle inbox: {}", name, err)
                 }
             };
 
-            self.send(name, "lead", &output)?;
-            self.update_member_status(name, MemberStatus::Idle)?;
+            self.send(&name, "lead", &output)?;
+            self.update_member_status(&name, MemberStatus::Idle)?;
         }
 
         Ok(())
@@ -702,39 +715,50 @@ fn default_task_binding_mode() -> TaskBindingMode {
     TaskBindingMode::BestEffort
 }
 
+fn spawn_request_from_input(input: SpawnInput) -> SpawnTeammateRequest {
+    SpawnTeammateRequest {
+        name: input.name,
+        role: input.role,
+        prompt: input.prompt,
+        task_id: input.task_id,
+        validation_mode: input.validation_mode,
+    }
+}
+
+fn spawn_request_from_huddle_member(member: &TeamHuddleMember) -> SpawnTeammateRequest {
+    SpawnTeammateRequest {
+        name: member.name.clone(),
+        role: member.role.clone(),
+        prompt: member.prompt.clone(),
+        task_id: member.task_id.clone(),
+        validation_mode: member.validation_mode,
+    }
+}
+
 pub fn team_tool_handlers(
     manager: Arc<TeamManager>,
     agent_loop: Arc<AgentLoop>,
     child_registry: Arc<GlobalToolRegistry>,
     task_registry: Arc<TaskRegistry>,
 ) -> Vec<ToolHandler> {
+    let deps = TeamRuntimeDeps {
+        agent_loop,
+        child_registry,
+        task_registry,
+    };
+
     vec![
-        spawn_teammate_handler(
-            Arc::clone(&manager),
-            Arc::clone(&agent_loop),
-            Arc::clone(&child_registry),
-            Arc::clone(&task_registry),
-        ),
-        team_huddle_handler(
-            Arc::clone(&manager),
-            Arc::clone(&agent_loop),
-            Arc::clone(&child_registry),
-            Arc::clone(&task_registry),
-        ),
+        spawn_teammate_handler(Arc::clone(&manager), deps.clone()),
+        team_huddle_handler(Arc::clone(&manager), deps.clone()),
         send_teammate_message_handler(Arc::clone(&manager)),
         broadcast_teammate_message_handler(Arc::clone(&manager)),
         read_teammate_inbox_handler(Arc::clone(&manager)),
-        team_status_handler(Arc::clone(&manager), Arc::clone(&task_registry)),
+        team_status_handler(Arc::clone(&manager), Arc::clone(&deps.task_registry)),
         shutdown_teammate_handler(manager),
     ]
 }
 
-fn spawn_teammate_handler(
-    manager: Arc<TeamManager>,
-    agent_loop: Arc<AgentLoop>,
-    child_registry: Arc<GlobalToolRegistry>,
-    task_registry: Arc<TaskRegistry>,
-) -> ToolHandler {
+fn spawn_teammate_handler(manager: Arc<TeamManager>, deps: TeamRuntimeDeps) -> ToolHandler {
     let definition = ToolDefinition {
         name: "spawn_teammate".to_string(),
         description: "Spawn a persistent teammate worker with a role and an initial assignment. The teammate keeps listening on its inbox and reports back to lead.".to_string(),
@@ -755,16 +779,7 @@ fn spawn_teammate_handler(
     let execute: ToolExecutor = Arc::new(move |input_json: &str| {
         let input: SpawnInput =
             serde_json::from_str(input_json).context("invalid input JSON for spawn_teammate")?;
-        manager.spawn_teammate(
-            &input.name,
-            &input.role,
-            &input.prompt,
-            input.task_id.as_deref(),
-            input.validation_mode,
-            Arc::clone(&agent_loop),
-            Arc::clone(&child_registry),
-            Arc::clone(&task_registry),
-        )
+        manager.spawn_teammate(spawn_request_from_input(input), deps.clone())
     });
 
     ToolHandler::new(definition, execute)
@@ -795,12 +810,7 @@ fn send_teammate_message_handler(manager: Arc<TeamManager>) -> ToolHandler {
     ToolHandler::new(definition, execute)
 }
 
-fn team_huddle_handler(
-    manager: Arc<TeamManager>,
-    agent_loop: Arc<AgentLoop>,
-    child_registry: Arc<GlobalToolRegistry>,
-    task_registry: Arc<TaskRegistry>,
-) -> ToolHandler {
+fn team_huddle_handler(manager: Arc<TeamManager>, deps: TeamRuntimeDeps) -> ToolHandler {
     let definition = ToolDefinition {
         name: "team_huddle".to_string(),
         description: "Spawn a small set of teammates, let them work in parallel, and return a structured lead summary. This is the simplest fan-out/fan-in team orchestration tool.".to_string(),
@@ -837,13 +847,7 @@ fn team_huddle_handler(
             bail!("team_huddle requires at least one member");
         }
 
-        manager.team_huddle_json(
-            &input.members,
-            Arc::clone(&agent_loop),
-            Arc::clone(&child_registry),
-            Arc::clone(&task_registry),
-            input.wait_ms,
-        )
+        manager.team_huddle_json(&input.members, deps.clone(), input.wait_ms)
     });
 
     ToolHandler::new(definition, execute)

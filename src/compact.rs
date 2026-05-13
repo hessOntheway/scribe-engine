@@ -26,16 +26,6 @@ pub struct AutoCompactEvent {
     pub transcript_path: Option<PathBuf>,
 }
 
-pub fn apply_micro_compact(_messages: &mut [Value], cfg: &ContextCompactConfig) {
-    // Kept as a compatibility hook for existing call sites and environment
-    // knobs. Tool result payloads must remain stable between requests so
-    // provider prompt caches can hit reliably.
-    let _ = (
-        cfg.micro_keep_recent_tool_results,
-        cfg.micro_min_tool_result_chars,
-    );
-}
-
 pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
     messages.iter().map(estimate_message_tokens).sum::<usize>()
 }
@@ -202,14 +192,13 @@ pub fn remove_orphan_tool_messages(messages: &mut Vec<Value>) -> usize {
         cleaned.push(message);
     }
 
-    if !pending_tool_call_ids.is_empty() {
-        if let Some(previous) = cleaned.last_mut() {
-            if previous.get("role").and_then(Value::as_str) == Some("assistant")
-                && previous.get("tool_calls").is_some()
-            {
-                previous.as_object_mut().map(|obj| obj.remove("tool_calls"));
-            }
-        }
+    if !pending_tool_call_ids.is_empty()
+        && let Some(previous) = cleaned.last_mut()
+        && previous.get("role").and_then(Value::as_str) == Some("assistant")
+        && previous.get("tool_calls").is_some()
+        && let Some(obj) = previous.as_object_mut()
+    {
+        obj.remove("tool_calls");
     }
 
     *messages = cleaned;
@@ -604,41 +593,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn micro_compact_keeps_tool_results_unchanged() {
-        let mut messages = vec![
-            json!({
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "function": { "name": "grep_search", "arguments": "{}" }
-                    },
-                    {
-                        "id": "call_2",
-                        "function": { "name": "glob_search", "arguments": "{}" }
-                    }
-                ]
-            }),
-            json!({"role": "tool", "tool_call_id": "call_1", "content": "x".repeat(200)}),
-            json!({"role": "tool", "tool_call_id": "call_2", "content": "y".repeat(200)}),
-        ];
-        let original_messages = messages.clone();
-
-        let cfg = ContextCompactConfig {
-            enabled: true,
-            micro_keep_recent_tool_results: 1,
-            micro_min_tool_result_chars: 100,
-            auto_token_threshold: 50_000,
-            auto_preserve_recent_messages: 4,
-            transcript_dir: ".transcripts".to_string(),
-        };
-
-        apply_micro_compact(&mut messages, &cfg);
-
-        assert_eq!(messages, original_messages);
-    }
-
-    #[test]
     fn auto_compact_plan_ignores_large_tool_content_below_overall_threshold() {
         let messages = vec![
             json!({"role": "system", "content": "sys"}),
@@ -656,8 +610,6 @@ mod tests {
         ];
         let cfg = ContextCompactConfig {
             enabled: true,
-            micro_keep_recent_tool_results: 0,
-            micro_min_tool_result_chars: 1,
             auto_token_threshold: 100_000,
             auto_preserve_recent_messages: 2,
             transcript_dir: ".transcripts".to_string(),
@@ -746,8 +698,6 @@ mod tests {
         ];
         let cfg = ContextCompactConfig {
             enabled: true,
-            micro_keep_recent_tool_results: 3,
-            micro_min_tool_result_chars: 100,
             auto_token_threshold: 1,
             auto_preserve_recent_messages: 2,
             transcript_dir: ".transcripts".to_string(),
@@ -778,8 +728,6 @@ mod tests {
         ];
         let cfg = ContextCompactConfig {
             enabled: true,
-            micro_keep_recent_tool_results: 3,
-            micro_min_tool_result_chars: 100,
             auto_token_threshold: 100,
             auto_preserve_recent_messages: 1,
             transcript_dir: ".transcripts".to_string(),
@@ -800,8 +748,6 @@ mod tests {
         ];
         let cfg = ContextCompactConfig {
             enabled: true,
-            micro_keep_recent_tool_results: 3,
-            micro_min_tool_result_chars: 100,
             auto_token_threshold: 1,
             auto_preserve_recent_messages: 1,
             transcript_dir: ".transcripts".to_string(),
@@ -880,8 +826,6 @@ mod tests {
 
         let cfg = ContextCompactConfig {
             enabled: true,
-            micro_keep_recent_tool_results: 3,
-            micro_min_tool_result_chars: 100,
             auto_token_threshold: 100,
             auto_preserve_recent_messages: 2,
             transcript_dir: ".transcripts_test".to_string(),

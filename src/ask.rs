@@ -90,9 +90,13 @@ impl AskApp {
     }
 
     pub fn new_empty_session(&self, agent_kind: AgentKind) -> Result<ConversationSession> {
-        let session = ConversationSession::new_empty(
+        let session = ConversationSession::new_with_messages(
             agent_kind,
-            agent_kind.system_prompt(),
+            vec![serde_json::json!({
+                "role": "system",
+                "content": agent_kind.system_prompt(),
+            })],
+            Vec::new(),
             &self.transcript_dir,
         )?;
         session.save()?;

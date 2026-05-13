@@ -84,13 +84,13 @@ fn run_glob_search(input: &GlobSearchInput) -> Result<GlobSearchOutput> {
     let mut truncated = false;
 
     if root.is_file() {
-        if let Some(file_name) = root.file_name() {
-            if matcher.is_match(file_name) {
-                matches.push(GlobSearchMatch {
-                    path: file_name.to_string_lossy().to_string(),
-                    kind: "file".to_string(),
-                });
-            }
+        if let Some(file_name) = root.file_name()
+            && matcher.is_match(file_name)
+        {
+            matches.push(GlobSearchMatch {
+                path: file_name.to_string_lossy().to_string(),
+                kind: "file".to_string(),
+            });
         }
 
         return Ok(GlobSearchOutput {

@@ -122,10 +122,10 @@ pub fn mcp_plugin_tools_from_config() -> Result<Vec<ToolHandler>> {
                     .with_context(|| format!("MCP tool call failed: {}", tool_name))?;
                 let saved_files = persist_graph_images(&tool_name, &mut result)?;
 
-                if !saved_files.is_empty() {
-                    if let Some(obj) = result.as_object_mut() {
-                        obj.insert("saved_files".to_string(), json!(saved_files));
-                    }
+                if !saved_files.is_empty()
+                    && let Some(obj) = result.as_object_mut()
+                {
+                    obj.insert("saved_files".to_string(), json!(saved_files));
                 }
 
                 serde_json::to_string_pretty(&result).context("failed to serialize MCP tool output")
@@ -413,14 +413,14 @@ impl McpClient {
                 break;
             }
 
-            if let Some((key, value)) = trimmed.split_once(':') {
-                if key.eq_ignore_ascii_case("Content-Length") {
-                    let parsed = value
-                        .trim()
-                        .parse::<usize>()
-                        .context("invalid Content-Length value from MCP server")?;
-                    content_length = Some(parsed);
-                }
+            if let Some((key, value)) = trimmed.split_once(':')
+                && key.eq_ignore_ascii_case("Content-Length")
+            {
+                let parsed = value
+                    .trim()
+                    .parse::<usize>()
+                    .context("invalid Content-Length value from MCP server")?;
+                content_length = Some(parsed);
             }
         }
 

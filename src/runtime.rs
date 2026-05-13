@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::compact::{apply_micro_compact, auto_compact_if_needed, remove_orphan_tool_messages};
+use crate::compact::{auto_compact_if_needed, remove_orphan_tool_messages};
 use crate::llm::openai::OpenAiCompatClient;
 use crate::llm::session::ConversationSession;
 use crate::llm::usage::PromptCacheStats;
@@ -133,14 +133,13 @@ impl AgentLoop {
                     removed_orphan_tools
                 );
             }
-            apply_micro_compact(messages, &compact_cfg);
             if let Some(event) = auto_compact_if_needed(
                 messages,
                 &compact_cfg,
                 self.llm.as_ref(),
                 audit_log_path_override,
                 &tool_definitions,
-                prompt_cache_stats.as_mut().map(|stats| &mut **stats),
+                prompt_cache_stats.as_deref_mut(),
             )? {
                 let transcript = event
                     .transcript_path
@@ -164,7 +163,7 @@ impl AgentLoop {
             }
 
             let assistant = self.llm.create_chat_completion_with_audit_path(
-                &messages,
+                messages,
                 &tool_definitions,
                 audit_log_path_override,
             )?;

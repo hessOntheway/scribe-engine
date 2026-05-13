@@ -63,8 +63,6 @@ pub struct LlmConfig {
 #[derive(Debug, Clone)]
 pub struct ContextCompactConfig {
     pub enabled: bool,
-    pub micro_keep_recent_tool_results: usize,
-    pub micro_min_tool_result_chars: usize,
     pub auto_token_threshold: usize,
     pub auto_preserve_recent_messages: usize,
     pub transcript_dir: String,
@@ -87,10 +85,6 @@ struct LlmEnv {
     llm_prompt_cache_dir: String,
     #[serde(default = "default_context_compact_enabled")]
     llm_context_compact_enabled: bool,
-    #[serde(default = "default_micro_keep_recent_tool_results")]
-    llm_micro_compact_keep_recent_tool_results: usize,
-    #[serde(default = "default_micro_min_tool_result_chars")]
-    llm_micro_compact_min_tool_result_chars: usize,
     #[serde(default = "default_auto_compact_token_threshold")]
     llm_auto_compact_token_threshold: usize,
     #[serde(default = "default_auto_compact_preserve_recent_messages")]
@@ -115,8 +109,6 @@ impl LlmConfig {
             prompt_cache_dir: env.llm_prompt_cache_dir,
             context_compact: ContextCompactConfig {
                 enabled: env.llm_context_compact_enabled,
-                micro_keep_recent_tool_results: env.llm_micro_compact_keep_recent_tool_results,
-                micro_min_tool_result_chars: env.llm_micro_compact_min_tool_result_chars,
                 auto_token_threshold: env.llm_auto_compact_token_threshold,
                 auto_preserve_recent_messages: env.llm_auto_compact_preserve_recent_messages,
                 transcript_dir: env.llm_context_compact_transcript_dir,
@@ -143,14 +135,6 @@ fn default_llm_prompt_cache_dir() -> String {
 
 fn default_context_compact_enabled() -> bool {
     true
-}
-
-fn default_micro_keep_recent_tool_results() -> usize {
-    3
-}
-
-fn default_micro_min_tool_result_chars() -> usize {
-    100
 }
 
 fn default_auto_compact_token_threshold() -> usize {

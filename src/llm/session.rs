@@ -31,19 +31,6 @@ pub struct ConversationSession {
 }
 
 impl ConversationSession {
-    pub fn new_empty(
-        agent_kind: AgentKind,
-        system_prompt: &str,
-        transcript_dir: &str,
-    ) -> Result<Self> {
-        Self::new_with_messages(
-            agent_kind,
-            vec![json!({"role": "system", "content": system_prompt})],
-            Vec::new(),
-            transcript_dir,
-        )
-    }
-
     pub fn new_with_messages(
         agent_kind: AgentKind,
         messages: Vec<Value>,
@@ -133,12 +120,11 @@ impl ConversationSession {
     }
 
     pub fn save(&self) -> Result<()> {
-        if let Some(parent) = self.session_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                create_dir_all(parent).with_context(|| {
-                    format!("failed to create session dir: {}", parent.display())
-                })?;
-            }
+        if let Some(parent) = self.session_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            create_dir_all(parent)
+                .with_context(|| format!("failed to create session dir: {}", parent.display()))?;
         }
 
         let payload = serde_json::to_string_pretty(&self.snapshot)
@@ -250,9 +236,10 @@ mod tests {
     #[test]
     fn truncate_to_removes_cancelled_turn_messages_and_prompts() {
         let dir = unique_transcript_dir();
-        let mut session = ConversationSession::new_empty(
+        let mut session = ConversationSession::new_with_messages(
             AgentKind::InterviewMaterials,
-            "system",
+            vec![json!({"role": "system", "content": "system"})],
+            Vec::new(),
             dir.to_str().unwrap(),
         )
         .expect("create session");

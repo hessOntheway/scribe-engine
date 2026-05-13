@@ -47,11 +47,11 @@ pub fn write_file_handler() -> ToolHandler {
         fs::write(&path, input.content)
             .with_context(|| format!("failed to write file {}", path.display()))?;
 
-        Ok(serde_json::to_string_pretty(&json!({
+        serde_json::to_string_pretty(&json!({
             "ok": true,
             "path": path.display().to_string(),
         }))
-        .context("failed to encode write_file output")?)
+        .context("failed to encode write_file output")
     });
 
     ToolHandler::new(definition, execute)

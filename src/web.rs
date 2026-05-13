@@ -682,18 +682,18 @@ impl LiveConversationManager {
             });
 
             if !is_internal_seed_message(&prompt) {
-                let user_message = base_ui_message(
-                    &snapshot.session_id,
-                    inner.next_message_index,
-                    "user",
-                    "user",
-                    prompt,
-                    now_unix_ms(),
-                    None,
-                    None,
-                    None,
+                let user_message = base_ui_message(UiMessageInput {
+                    session_id: &snapshot.session_id,
+                    index: inner.next_message_index,
+                    role: "user",
+                    kind: "user",
+                    content: prompt,
+                    created_at: now_unix_ms(),
+                    tool_name: None,
+                    tool_args: None,
+                    tool_output: None,
                     turn_id,
-                );
+                });
                 inner.next_message_index += 1;
                 inner.ui_messages.push(user_message.clone());
                 new_messages.push(user_message);
@@ -795,18 +795,18 @@ impl LiveConversationManager {
             if !active_turn_matches(&inner, session_id, turn_id) {
                 return Ok(None);
             }
-            let ui_message = base_ui_message(
+            let ui_message = base_ui_message(UiMessageInput {
                 session_id,
-                inner.next_message_index,
-                &pending.role,
-                &pending.kind,
-                pending.content,
-                pending.created_at,
-                pending.tool_name,
-                pending.tool_args,
-                pending.tool_output,
+                index: inner.next_message_index,
+                role: &pending.role,
+                kind: &pending.kind,
+                content: pending.content,
+                created_at: pending.created_at,
+                tool_name: pending.tool_name,
+                tool_args: pending.tool_args,
+                tool_output: pending.tool_output,
                 turn_id,
-            );
+            });
             inner.next_message_index += 1;
             inner.ui_messages.push(ui_message.clone());
             let persisted = self.snapshot_from_inner(&inner);
@@ -835,18 +835,18 @@ impl LiveConversationManager {
             if !active_turn_matches(&inner, session_id, turn_id) {
                 return Ok(None);
             }
-            let ui_message = base_trace_message(
+            let ui_message = base_trace_message(UiMessageInput {
                 session_id,
-                inner.next_trace_index,
-                &pending.role,
-                &pending.kind,
-                pending.content,
-                pending.created_at,
-                pending.tool_name,
-                pending.tool_args,
-                pending.tool_output,
+                index: inner.next_trace_index,
+                role: &pending.role,
+                kind: &pending.kind,
+                content: pending.content,
+                created_at: pending.created_at,
+                tool_name: pending.tool_name,
+                tool_args: pending.tool_args,
+                tool_output: pending.tool_output,
                 turn_id,
-            );
+            });
             inner.next_trace_index += 1;
             ui_message
         };
@@ -1299,11 +1299,11 @@ impl WorkflowManager {
         agent_kind: AgentKind,
         response: &LiveSubmitResponse,
     ) -> Result<WorkflowSnapshot, AppError> {
-        if agent_kind == AgentKind::InterviewMaterials {
-            if let Some(session_id) = response.session_id.as_deref() {
-                self.copy_latest_materials_to_session(session_id)
-                    .map_err(AppError::internal)?;
-            }
+        if agent_kind == AgentKind::InterviewMaterials
+            && let Some(session_id) = response.session_id.as_deref()
+        {
+            self.copy_latest_materials_to_session(session_id)
+                .map_err(AppError::internal)?;
         }
 
         {
@@ -1792,11 +1792,11 @@ fn refresh_workflow_metadata(
     if snapshot.interview_session_id.is_none() {
         snapshot.interview_status = InterviewStatus::NotStarted;
         snapshot.interview_phase = "INIT".to_string();
-    } else if let Some(session_id) = snapshot.interview_session_id.as_deref() {
-        if ask_app.session_report_path(session_id).is_file() {
-            snapshot.interview_status = InterviewStatus::Completed;
-            snapshot.interview_phase = "REPORT".to_string();
-        }
+    } else if let Some(session_id) = snapshot.interview_session_id.as_deref()
+        && ask_app.session_report_path(session_id).is_file()
+    {
+        snapshot.interview_status = InterviewStatus::Completed;
+        snapshot.interview_phase = "REPORT".to_string();
     }
     snapshot.report = report_meta_for_session(ask_app, snapshot.materials_session_id.as_deref());
 }
@@ -2032,18 +2032,18 @@ fn flatten_messages(
 
         if role == "user" {
             turn_number += 1;
-            ui_messages.push(base_ui_message(
+            ui_messages.push(base_ui_message(UiMessageInput {
                 session_id,
-                absolute_index,
-                "user",
-                "user",
+                index: absolute_index,
+                role: "user",
+                kind: "user",
                 content,
                 created_at,
-                None,
-                None,
-                None,
-                turn_number,
-            ));
+                tool_name: None,
+                tool_args: None,
+                tool_output: None,
+                turn_id: turn_number,
+            }));
             continue;
         }
 
@@ -2055,18 +2055,18 @@ fn flatten_messages(
                 .and_then(Value::as_array)
                 .is_some_and(|calls| !calls.is_empty());
             if !has_tool_calls && !content.trim().is_empty() {
-                ui_messages.push(base_ui_message(
+                ui_messages.push(base_ui_message(UiMessageInput {
                     session_id,
-                    absolute_index,
-                    "assistant",
-                    "assistant",
-                    content.clone(),
+                    index: absolute_index,
+                    role: "assistant",
+                    kind: "assistant",
+                    content: content.clone(),
                     created_at,
-                    None,
-                    None,
-                    None,
-                    effective_turn,
-                ));
+                    tool_name: None,
+                    tool_args: None,
+                    tool_output: None,
+                    turn_id: effective_turn,
+                }));
             }
             continue;
         }
@@ -2075,82 +2075,66 @@ fn flatten_messages(
             continue;
         }
 
-        ui_messages.push(base_ui_message(
+        ui_messages.push(base_ui_message(UiMessageInput {
             session_id,
-            absolute_index,
-            &role,
-            &role,
+            index: absolute_index,
+            role: &role,
+            kind: &role,
             content,
             created_at,
-            None,
-            None,
-            None,
-            effective_turn,
-        ));
+            tool_name: None,
+            tool_args: None,
+            tool_output: None,
+            turn_id: effective_turn,
+        }));
     }
 
     ui_messages
 }
 
-fn base_ui_message(
-    session_id: &str,
+struct UiMessageInput<'a> {
+    session_id: &'a str,
     index: usize,
-    role: &str,
-    kind: &str,
+    role: &'a str,
+    kind: &'a str,
     content: String,
     created_at: u128,
     tool_name: Option<String>,
     tool_args: Option<String>,
     tool_output: Option<String>,
     turn_id: u64,
-) -> UiMessage {
-    let text_for_blocks = if kind == "tool_result" {
-        tool_output.clone().unwrap_or_default()
-    } else if kind == "tool_call" {
-        tool_args.clone().unwrap_or_default()
+}
+
+fn base_ui_message(input: UiMessageInput<'_>) -> UiMessage {
+    let text_for_blocks = if input.kind == "tool_result" {
+        input.tool_output.clone().unwrap_or_default()
+    } else if input.kind == "tool_call" {
+        input.tool_args.clone().unwrap_or_default()
     } else {
-        content.clone()
+        input.content.clone()
     };
 
     UiMessage {
-        id: format!("{session_id}-{index}-{kind}"),
-        role: role.to_string(),
-        kind: kind.to_string(),
-        content,
-        created_at,
-        turn_id: format!("{session_id}-turn-{turn_id}"),
-        tool_name,
-        tool_args,
-        tool_output,
-        render_blocks: parse_render_blocks(&text_for_blocks, kind),
+        id: format!("{}-{}-{}", input.session_id, input.index, input.kind),
+        role: input.role.to_string(),
+        kind: input.kind.to_string(),
+        content: input.content,
+        created_at: input.created_at,
+        turn_id: format!("{}-turn-{}", input.session_id, input.turn_id),
+        tool_name: input.tool_name,
+        tool_args: input.tool_args,
+        tool_output: input.tool_output,
+        render_blocks: parse_render_blocks(&text_for_blocks, input.kind),
     }
 }
 
-fn base_trace_message(
-    session_id: &str,
-    index: usize,
-    role: &str,
-    kind: &str,
-    content: String,
-    created_at: u128,
-    tool_name: Option<String>,
-    tool_args: Option<String>,
-    tool_output: Option<String>,
-    turn_id: u64,
-) -> UiMessage {
-    let mut message = base_ui_message(
-        session_id,
-        index,
-        role,
-        kind,
-        content,
-        created_at,
-        tool_name,
-        tool_args,
-        tool_output,
-        turn_id,
+fn base_trace_message(input: UiMessageInput<'_>) -> UiMessage {
+    let trace_id = format!(
+        "{}-trace-{}-{}-{}",
+        input.session_id, input.turn_id, input.index, input.kind
     );
-    message.id = format!("{session_id}-trace-{turn_id}-{index}-{kind}");
+    let mut message = base_ui_message(input);
+    message.id = trace_id;
     message
 }
 
@@ -2463,30 +2447,30 @@ mod tests {
     #[test]
     fn visible_messages_filter_excludes_trace_messages() {
         let messages = vec![
-            base_ui_message(
-                "session_test",
-                0,
-                "user",
-                "user",
-                "hello".to_string(),
-                1,
-                None,
-                None,
-                None,
-                1,
-            ),
-            base_trace_message(
-                "session_test",
-                0,
-                "assistant",
-                "tool_call",
-                String::new(),
-                1,
-                Some("read_file".to_string()),
-                Some("{}".to_string()),
-                None,
-                1,
-            ),
+            base_ui_message(UiMessageInput {
+                session_id: "session_test",
+                index: 0,
+                role: "user",
+                kind: "user",
+                content: "hello".to_string(),
+                created_at: 1,
+                tool_name: None,
+                tool_args: None,
+                tool_output: None,
+                turn_id: 1,
+            }),
+            base_trace_message(UiMessageInput {
+                session_id: "session_test",
+                index: 0,
+                role: "assistant",
+                kind: "tool_call",
+                content: String::new(),
+                created_at: 1,
+                tool_name: Some("read_file".to_string()),
+                tool_args: Some("{}".to_string()),
+                tool_output: None,
+                turn_id: 1,
+            }),
         ];
 
         let visible = visible_messages_only(&messages);
@@ -2497,18 +2481,18 @@ mod tests {
 
     #[test]
     fn public_trace_message_strips_tool_result_output() {
-        let message = base_trace_message(
-            "session_test",
-            0,
-            "tool",
-            "tool_result",
-            String::new(),
-            1,
-            Some("read_file".to_string()),
-            Some(r#"{"path":"src/main.rs"}"#.to_string()),
-            Some("very large file contents".repeat(100)),
-            1,
-        );
+        let message = base_trace_message(UiMessageInput {
+            session_id: "session_test",
+            index: 0,
+            role: "tool",
+            kind: "tool_result",
+            content: String::new(),
+            created_at: 1,
+            tool_name: Some("read_file".to_string()),
+            tool_args: Some(r#"{"path":"src/main.rs"}"#.to_string()),
+            tool_output: Some("very large file contents".repeat(100)),
+            turn_id: 1,
+        });
 
         let public = public_trace_message(&message);
 

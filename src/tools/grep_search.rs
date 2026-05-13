@@ -130,10 +130,10 @@ fn run_grep_search(input: &GrepSearchInput) -> Result<GrepSearchOutput> {
             continue;
         }
 
-        if let Some(set) = &glob_set {
-            if !set.is_match(entry.path()) {
-                continue;
-            }
+        if let Some(set) = &glob_set
+            && !set.is_match(entry.path())
+        {
+            continue;
         }
 
         let content = match std::fs::read_to_string(entry.path()) {
