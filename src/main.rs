@@ -1,18 +1,8 @@
-mod agents;
-mod ask;
-mod cli;
-mod compact;
-mod config;
-mod llm;
-mod runtime;
-mod tools;
-mod web;
-
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
-use crate::tools::{GlobalToolRegistry, mcp_plugin_tools_from_config};
+use my_claw::cli::{Cli, Command};
+use my_claw::{ask_app_from_env, build_registry, web};
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -39,7 +29,7 @@ fn main() -> Result<()> {
             port,
             max_steps,
         } => {
-            let ask_app = ask::AskApp::from_env(max_steps, build_registry()?)?;
+            let ask_app = ask_app_from_env(max_steps)?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -47,13 +37,4 @@ fn main() -> Result<()> {
             runtime.block_on(web::serve(ask_app, host, port))
         }
     }
-}
-
-fn build_registry() -> Result<GlobalToolRegistry> {
-    let plugin_tools = mcp_plugin_tools_from_config().context("failed to load MCP plugin tools")?;
-    GlobalToolRegistry::builtins().with_plugin_tools(plugin_tools)
-}
-
-fn github_auth_available() -> bool {
-    std::env::var("GITHUB_USERNAME").is_ok() && std::env::var("GITHUB_PASSWORD").is_ok()
 }

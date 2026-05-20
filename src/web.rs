@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 use tokio::task;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::ask::AskApp;
@@ -1508,11 +1509,39 @@ impl WorkflowManager {
     }
 }
 
-pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
+pub fn api_router(ask_app: AskApp) -> Result<Router> {
     let workflow = Arc::new(WorkflowManager::bootstrap(ask_app)?);
     let state = WebState { workflow };
-    let static_dir = PathBuf::from("static");
-    let app = Router::new()
+    Ok(api_routes().layer(CorsLayer::permissive()).with_state(state))
+}
+
+pub fn router(ask_app: AskApp) -> Result<Router> {
+    let workflow = Arc::new(WorkflowManager::bootstrap(ask_app)?);
+    let state = WebState { workflow };
+    let frontend_dist_dir = PathBuf::from("frontend").join("dist");
+    let frontend_index = frontend_dist_dir.join("index.html");
+    if !frontend_dist_dir.is_dir() {
+        return Err(anyhow!(
+            "frontend assets not found at {}; run `npm run build` in frontend/ before starting the web server",
+            frontend_dist_dir.display()
+        ));
+    }
+    if !frontend_index.is_file() {
+        return Err(anyhow!(
+            "frontend entrypoint not found at {}; run `npm run build` in frontend/ before starting the web server",
+            frontend_index.display()
+        ));
+    }
+    Ok(api_routes()
+        .fallback_service(
+            ServeDir::new(&frontend_dist_dir).not_found_service(ServeFile::new(frontend_index)),
+        )
+        .layer(CorsLayer::permissive())
+        .with_state(state))
+}
+
+fn api_routes() -> Router<WebState> {
+    Router::new()
         .route("/api/health", get(health))
         .route("/api/sessions", get(list_sessions))
         .route("/api/workflow", get(get_workflow))
@@ -1538,12 +1567,9 @@ pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
         .route("/api/interview/start", post(post_interview_start))
         .route("/api/interview/finish", post(post_interview_finish))
         .route("/api/interview/report", get(get_interview_report))
-        .fallback_service(
-            ServeDir::new(&static_dir)
-                .not_found_service(ServeFile::new(static_dir.join("index.html"))),
-        )
-        .with_state(state);
+}
 
+pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .with_context(|| format!("invalid bind address: {host}:{port}"))?;
@@ -1551,10 +1577,27 @@ pub async fn serve(ask_app: AskApp, host: String, port: u16) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind web server on http://{host}:{port}"))?;
 
-    println!("Scribe web UI running at http://{host}:{port}");
-    axum::serve(listener, app)
+    serve_listener(ask_app, listener).await
+}
+
+pub async fn serve_listener(ask_app: AskApp, listener: tokio::net::TcpListener) -> Result<()> {
+    let addr = listener
+        .local_addr()
+        .context("failed to read web server listener address")?;
+    println!("Scribe web UI running at http://{addr}");
+    axum::serve(listener, router(ask_app)?)
         .await
         .context("web server exited unexpectedly")
+}
+
+pub async fn serve_api_listener(ask_app: AskApp, listener: tokio::net::TcpListener) -> Result<()> {
+    let addr = listener
+        .local_addr()
+        .context("failed to read API listener address")?;
+    println!("Scribe API running at http://{addr}");
+    axum::serve(listener, api_router(ask_app)?)
+        .await
+        .context("API server exited unexpectedly")
 }
 
 async fn health() -> Json<HealthResponse> {

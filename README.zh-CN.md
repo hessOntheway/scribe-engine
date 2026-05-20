@@ -17,7 +17,7 @@ Scribe Engine 在本地 Web UI 后面协调两个 Agent：
 
 ```mermaid
 flowchart TD
-    Candidate[程序员 / 候选人] --> UI[static/ Web UI]
+    Candidate[程序员 / 候选人] --> UI[frontend/ React/Vite UI]
     UI --> MaterialsAPI[材料生成 live session]
     MaterialsAPI --> MaterialsAgent[Interview Materials Agent]
     MaterialsAgent --> Tools[代码搜索、读文件、Web fetch、写文件、MCP、task/team 工具]
@@ -61,7 +61,8 @@ cargo run -- tool-call --name glob_search --input '{"pattern":"src/**/*.rs"}'
 - `src/runtime.rs` 执行模型/工具循环，推送 runtime event，检查取消信号，并触发上下文压缩。
 - `src/llm/` 包含 OpenAI-compatible 客户端、会话持久化、prompt cache 和 usage 统计。
 - `src/tools/` 包含 materials agent 可调用的模型工具。
-- `static/` 是浏览器 UI，负责调用 REST API 并监听 SSE 更新。
+- `frontend/` 是 React/Vite 浏览器 UI，负责调用 REST API 并监听 SSE 更新。
+- `src-tauri/` 将 React UI 和 Rust 后端打包为桌面应用。
 - `config/` 保存可选 MCP server 配置。
 
 ## 目录导览
@@ -70,7 +71,8 @@ cargo run -- tool-call --name glob_search --input '{"pattern":"src/**/*.rs"}'
 - [`src/`](src/README.md)：Rust 后端模块边界和主控制流。
 - [`src/llm/`](src/llm/README.md)：模型调用、session、prompt cache、audit log 和压缩配置。
 - [`src/tools/`](src/tools/README.md)：内置工具、MCP 工具、task/team 协作。
-- [`static/`](static/README.md)：Web UI 状态、REST 调用、SSE 事件和 Mermaid 渲染。
+- [`frontend/`](frontend/)：React/Vite Web UI 源码，构建产物由 `frontend/dist` 提供。
+- [`src-tauri/`](src-tauri/)：React UI 与本地后端的 Tauri 桌面壳。
 
 `.transcripts/`、`.team/`、`logs/`、`.venv/`、`target/` 等被忽略目录只保存本地状态、生成产物或依赖，不作为源码目录维护 README。
 

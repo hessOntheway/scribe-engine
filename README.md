@@ -17,7 +17,7 @@ The runtime supports multiple sessions, session switching, persisted UI snapshot
 
 ```mermaid
 flowchart TD
-    Candidate[Programmer / candidate] --> UI[Web UI in static/]
+    Candidate[Programmer / candidate] --> UI[React/Vite UI in frontend/]
     UI --> MaterialsAPI[Materials live session]
     MaterialsAPI --> MaterialsAgent[Interview Materials Agent]
     MaterialsAgent --> Tools[Code search, file read, web fetch, write file, MCP, task/team tools]
@@ -61,7 +61,8 @@ cargo run -- tool-call --name glob_search --input '{"pattern":"src/**/*.rs"}'
 - `src/runtime.rs` runs the model/tool loop, streams runtime events, checks cancellation, and triggers context compaction.
 - `src/llm/` contains the OpenAI-compatible client, persisted conversation sessions, prompt cache, and usage accounting.
 - `src/tools/` contains model-facing tools used by the materials agent.
-- `static/` is the browser UI that calls REST endpoints and listens to SSE updates.
+- `frontend/` is the React/Vite browser UI that calls REST endpoints and listens to SSE updates.
+- `src-tauri/` packages the React UI with the Rust backend for the desktop app.
 - `config/` contains optional MCP server configuration.
 
 ## Directory Guide
@@ -70,7 +71,8 @@ cargo run -- tool-call --name glob_search --input '{"pattern":"src/**/*.rs"}'
 - [`src/`](src/README.md): Rust backend module boundaries and control flow.
 - [`src/llm/`](src/llm/README.md): model calls, sessions, prompt cache, audit logs, and compaction settings.
 - [`src/tools/`](src/tools/README.md): built-in tools, MCP tools, and task/team orchestration.
-- [`static/`](static/README.md): web UI state, REST calls, SSE events, and Mermaid rendering.
+- [`frontend/`](frontend/): React/Vite web UI source. Build output is served from `frontend/dist`.
+- [`src-tauri/`](src-tauri/): Tauri desktop shell for the React UI and local backend.
 
 Ignored runtime directories such as `.transcripts/`, `.team/`, `logs/`, `.venv/`, and `target/` are not documented as source directories because they hold local state, generated output, or dependencies.
 
